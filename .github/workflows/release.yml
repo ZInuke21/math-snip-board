@@ -1,0 +1,72 @@
+# Push a tag like v2.2.0 and this builds MathSnipBoard.exe on real Windows, runs the self-test,
+# and publishes a GitHub Release. Every copy of the app picks the release up through its updater.
+name: Build & release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get tag notes
+        shell: pwsh
+        run: git fetch --force --tags
+
+      - name: Set version from tag
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ($tag -notmatch '^v(\d+)\.(\d+)\.(\d+)$') {
+            if ("${{ github.event_name }}" -eq "push") { throw "Tags must look like v1.2.3 (got $tag)" }
+            $tag = "v0.0.0"
+          }
+          $v = $tag.Substring(1) + ".0"
+          (Get-Content src/Version.cs) -replace 'Version\("[0-9.]+"\)', "Version(""$v"")" | Set-Content src/Version.cs
+          Select-String -Path src/Version.cs -Pattern 'AssemblyVersion'
+
+      - name: Build with the Windows .NET Framework compiler
+        shell: cmd
+        run: build.cmd
+
+      - name: Self-test on Windows
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath .\MathSnipBoard.exe -ArgumentList '--selftest', "`"$PWD\selftest`"" -PassThru
+          if (-not $p.WaitForExit(120000)) { $p.Kill(); throw "Self-test timed out" }
+          if (Test-Path selftest\selftest.log) { Get-Content selftest\selftest.log }
+          if ($p.ExitCode -ne 0) { throw "Self-test failed (exit $($p.ExitCode))" }
+
+      - name: Updater can reach GitHub
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath .\MathSnipBoard.exe -ArgumentList '--update-check', "`"$PWD\update-check.txt`"" -PassThru
+          if (-not $p.WaitForExit(60000)) { $p.Kill(); throw "Update check timed out" }
+          Get-Content update-check.txt
+          if ($p.ExitCode -ne 0) { throw "Update check failed" }
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: MathSnipBoard
+          path: MathSnipBoard.exe
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          Compress-Archive -Path MathSnipBoard.exe -DestinationPath MathSnipBoard.zip -Force
+          gh release create "${{ github.ref_name }}" MathSnipBoard.exe MathSnipBoard.zip `
+            --title "Math Snip Board ${{ github.ref_name }}" --notes-from-tag

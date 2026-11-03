@@ -1,0 +1,4 @@
+*.cmd text eol=crlf
+*.cs text eol=lf
+*.ico binary
+*.png binary

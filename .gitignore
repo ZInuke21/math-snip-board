@@ -1,0 +1,7 @@
+*.exe
+*.zip
+*.download
+*.old
+dist/
+selftest/
+update-check.txt
