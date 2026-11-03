@@ -1,11 +1,20 @@
-# Push a tag like v2.2.0 and this builds MathSnipBoard.exe on real Windows, runs the self-test,
-# and publishes a GitHub Release. Every copy of the app picks the release up through its updater.
+# Builds MathSnipBoard.exe on real Windows, runs the self-test, and publishes a GitHub Release.
+# Start it from the Actions tab ("Run workflow", type a version + what's new) or by pushing a tag like v2.2.0.
+# Every installed copy of the app picks the new release up through its updater.
 name: Build & release
 
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      version:
+        description: "New version number, e.g. 2.2.0 (must be higher than the last one)"
+        required: true
+      notes:
+        description: "What's new - shown to the teacher. Separate items with ;  e.g. Fixed eraser lag; Added purple"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -23,17 +32,25 @@ jobs:
         shell: pwsh
         run: git fetch --force --tags
 
-      - name: Set version from tag
+      - name: Work out the version
+        id: ver
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
-          if ($tag -notmatch '^v(\d+)\.(\d+)\.(\d+)$') {
-            if ("${{ github.event_name }}" -eq "push") { throw "Tags must look like v1.2.3 (got $tag)" }
-            $tag = "v0.0.0"
-          }
-          $v = $tag.Substring(1) + ".0"
-          (Get-Content src/Version.cs) -replace 'Version\("[0-9.]+"\)', "Version(""$v"")" | Set-Content src/Version.cs
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") { $v = "${{ inputs.version }}".Trim().TrimStart('v','V') }
+          else { $v = "${{ github.ref_name }}".TrimStart('v') }
+          if ($v -notmatch '^\d+\.\d+\.\d+$') { throw "Version must look like 2.2.0 (got '$v')" }
+          "tag=v$v" >> $env:GITHUB_OUTPUT
+          (Get-Content src/Version.cs) -replace 'Version\("[0-9.]+"\)', "Version(""$v.0"")" | Set-Content src/Version.cs
           Select-String -Path src/Version.cs -Pattern 'AssemblyVersion'
+
+      - name: Make sure this version is new
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "${{ steps.ver.outputs.tag }}" *> $null
+          if ($LASTEXITCODE -eq 0) { throw "Release ${{ steps.ver.outputs.tag }} already exists - pick a higher version" }
+          $global:LASTEXITCODE = 0
 
       - name: Build with the Windows .NET Framework compiler
         shell: cmd
@@ -62,11 +79,18 @@ jobs:
           path: MathSnipBoard.exe
 
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          NOTES: ${{ inputs.notes }}
         run: |
+          $tag = "${{ steps.ver.outputs.tag }}"
           Compress-Archive -Path MathSnipBoard.exe -DestinationPath MathSnipBoard.zip -Force
-          gh release create "${{ github.ref_name }}" MathSnipBoard.exe MathSnipBoard.zip `
-            --title "Math Snip Board ${{ github.ref_name }}" --notes-from-tag
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $items = "$env:NOTES" -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+            if ($items) { ($items | ForEach-Object { "* $_" }) -join "`n" | Set-Content notes.md -Encoding utf8 }
+            else { "* Improvements and fixes" | Set-Content notes.md -Encoding utf8 }
+            gh release create $tag MathSnipBoard.exe MathSnipBoard.zip --target "${{ github.sha }}" --title "Math Snip Board $tag" --notes-file notes.md
+          } else {
+            gh release create $tag MathSnipBoard.exe MathSnipBoard.zip --title "Math Snip Board $tag" --notes-from-tag
+          }

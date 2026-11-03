@@ -41,13 +41,11 @@ Works on Windows 10 and 11 (uses the .NET Framework that comes with Windows). Th
 
 Every running copy checks [Releases](https://github.com/ZInuke21/math-snip-board/releases) every few hours and shows an **Update** button when there's something new.
 
-1. Make the change and commit it.
-2. Tag it with a version and a short "what's new" (shown to the teacher in the update prompt):
-   ```
-   git tag -a v2.2.0 -m "* Fixed the eraser lag" -m "* Added a new colour"
-   git push origin main --tags
-   ```
-3. The [Build & release](.github/workflows/release.yml) action compiles the exe on Windows, runs the self-test, and publishes the release. Done.
+1. Make the change and push it to `main`.
+2. Go to **Actions → [Build & release](../../actions/workflows/release.yml) → Run workflow**, type the new version (e.g. `2.2.0`) and what's new (e.g. `Fixed eraser lag; Added purple`), and click **Run workflow**.
+3. GitHub compiles the exe on Windows, runs the self-test, and publishes the release. The teacher's app offers the update on its own.
+
+(Prefer git? `git tag -a v2.2.0 -m "* Fixed eraser lag"` and `git push origin v2.2.0` does the same.)
 
 ## Building it yourself
 
