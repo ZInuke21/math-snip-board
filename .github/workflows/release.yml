@@ -87,7 +87,7 @@ jobs:
           if ($p.ExitCode -ne 0) { throw "Update check failed" }
 
       - name: Upload build
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: MathSnipBoard-${{ steps.ver.outputs.tag }}-${{ github.run_number }}
           path: |
