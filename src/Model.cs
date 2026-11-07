@@ -92,22 +92,44 @@ namespace MathSnip
 
         public int Count { get { return Pts.Count; } }
 
+        public static bool Finite(PointF p)
+        {
+            return !float.IsNaN(p.X) && !float.IsNaN(p.Y) && !float.IsInfinity(p.X) && !float.IsInfinity(p.Y);
+        }
+
         public void Add(PointF p, float w)
         {
+            if (!Finite(p) || float.IsNaN(w) || float.IsInfinity(w)) return;   // never store a point GDI+ can't draw
+            w = Math.Max(0.5f, w);
             Pts.Add(p);
             Ws.Add(w);
             var b = new RectangleF(p.X - w / 2 - 2, p.Y - w / 2 - 2, w + 4, w + 4);
             bounds = Geo.Union(bounds, b);
         }
 
+        // GDI+ on Windows throws "Out of memory" on some microscopic Bezier curves, and a pen tablet produces
+        // thousands of them. Curves smaller than ~2.5 screen pixels are drawn as two straight micro-lines
+        // instead (they look identical), and any GDI+ complaint falls back to lines rather than reaching the user.
+        public static int Fallbacks;
+        const float TinyPx = 2.5f;
+
+        public static float TinyFor(Graphics g) { return TinyPx / Math.Max(0.01f, Geo.ScaleOf(g)); }
+        public static float TinyForZoom(float zoom) { return TinyPx / Math.Max(0.01f, zoom); }
+
         static void Seg(Graphics g, Pen pen, PointF a, PointF b)
         {
             if (Geo.Dist(a, b) < 0.01f) return;
-            g.DrawLine(pen, a, b);
+            try { g.DrawLine(pen, a, b); }
+            catch { Fallbacks++; }
+        }
+
+        static bool IsTiny(PointF s, PointF c, PointF e, float tiny)
+        {
+            return Geo.Dist(s, c) + Geo.Dist(c, e) < tiny;
         }
 
         // Piece k: 0 = start, n-1 = tail, otherwise the curve through point k.
-        public void DrawSegment(Graphics g, Pen pen, int k)
+        public void DrawSegment(Graphics g, Pen pen, int k, float tiny)
         {
             int n = Pts.Count;
             if (n < 2 || k < 0 || k >= n) return;
@@ -115,30 +137,34 @@ namespace MathSnip
             if (k == 0) { Seg(g, pen, Pts[0], Geo.Mid(Pts[0], Pts[1])); return; }
             if (k == n - 1) { Seg(g, pen, Geo.Mid(Pts[n - 2], Pts[n - 1]), Pts[n - 1]); return; }
             PointF s = Geo.Mid(Pts[k - 1], Pts[k]), c = Pts[k], e = Geo.Mid(Pts[k], Pts[k + 1]);
-            g.DrawBezier(pen, s, Geo.Lerp(s, c, 2f / 3f), Geo.Lerp(e, c, 2f / 3f), e);
+            if (IsTiny(s, c, e, tiny)) { Seg(g, pen, s, c); Seg(g, pen, c, e); return; }
+            try { g.DrawBezier(pen, s, Geo.Lerp(s, c, 2f / 3f), Geo.Lerp(e, c, 2f / 3f), e); }
+            catch { Fallbacks++; Seg(g, pen, s, c); Seg(g, pen, c, e); }
         }
 
         void Dot(Graphics g)
         {
             float w = Math.Max(1f, Ws[0]);
-            using (var b = new SolidBrush(Ink)) g.FillEllipse(b, Pts[0].X - w / 2, Pts[0].Y - w / 2, w, w);
+            try { using (var b = new SolidBrush(Ink)) g.FillEllipse(b, Pts[0].X - w / 2, Pts[0].Y - w / 2, w, w); }
+            catch { Fallbacks++; }
         }
 
         public void DrawFinalized(Graphics g)
         {
             if (Pts.Count < 2) return;
+            float tiny = TinyFor(g);
             using (var pen = Geo.InkPen(Ink, 1f))
-                for (int k = 0; k < Pts.Count - 1; k++) DrawSegment(g, pen, k);
+                for (int k = 0; k < Pts.Count - 1; k++) DrawSegment(g, pen, k, tiny);
         }
 
         public void DrawTail(Graphics g)
         {
             if (Pts.Count == 0) return;
             if (Pts.Count == 1) { Dot(g); return; }
-            using (var pen = Geo.InkPen(Ink, 1f)) DrawSegment(g, pen, Pts.Count - 1);
+            using (var pen = Geo.InkPen(Ink, 1f)) DrawSegment(g, pen, Pts.Count - 1, TinyFor(g));
         }
 
-        GraphicsPath BuildPath()
+        GraphicsPath BuildPath(float tiny)
         {
             var path = new GraphicsPath();
             int n = Pts.Count;
@@ -146,7 +172,8 @@ namespace MathSnip
             for (int k = 1; k < n - 1; k++)
             {
                 PointF s = Geo.Mid(Pts[k - 1], Pts[k]), c = Pts[k], e = Geo.Mid(Pts[k], Pts[k + 1]);
-                path.AddBezier(s, Geo.Lerp(s, c, 2f / 3f), Geo.Lerp(e, c, 2f / 3f), e);
+                if (IsTiny(s, c, e, tiny)) { path.AddLine(s, c); path.AddLine(c, e); }
+                else path.AddBezier(s, Geo.Lerp(s, c, 2f / 3f), Geo.Lerp(e, c, 2f / 3f), e);
             }
             path.AddLine(Geo.Mid(Pts[n - 2], Pts[n - 1]), Pts[n - 1]);
             return path;
@@ -156,16 +183,26 @@ namespace MathSnip
         {
             if (Pts.Count == 0) return;
             if (Pts.Count == 1) { Dot(g); return; }
+            float tiny = TinyFor(g);
             if (Highlight)
             {
                 // One path, so the see-through ink doesn't get darker where pieces overlap.
-                using (var path = BuildPath())
                 using (var pen = Geo.InkPen(Ink, Ws[0]))
-                    g.DrawPath(pen, path);
+                {
+                    try
+                    {
+                        using (var path = BuildPath(tiny)) g.DrawPath(pen, path);
+                    }
+                    catch
+                    {
+                        Fallbacks++;
+                        try { g.DrawLines(pen, Pts.ToArray()); } catch { Fallbacks++; }
+                    }
+                }
                 return;
             }
             using (var pen = Geo.InkPen(Ink, 1f))
-                for (int k = 0; k < Pts.Count; k++) DrawSegment(g, pen, k);
+                for (int k = 0; k < Pts.Count; k++) DrawSegment(g, pen, k, tiny);
         }
 
         public override bool Hit(PointF q, float r)

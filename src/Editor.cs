@@ -628,6 +628,25 @@ namespace MathSnip
             board.Undo();
             check(board.Items.Count == before, "undo restores the erased stroke");
 
+            // Pen-tablet stress: dense, jittery, pressure-varying samples (what crashed v2.1.0 on Windows).
+            int beforeStress = board.Items.Count;
+            StrokeItem.Fallbacks = 0;
+            var jr = new Random(99);
+            for (int s = 0; s < 30; s++)
+            {
+                var sp = new List<PointF>();
+                float x = 150 + s * 25, y = 820;
+                for (int i = 0; i < 800; i++)
+                {
+                    x += (float)(jr.NextDouble() - 0.3) * 1.3f;
+                    y += (float)(jr.NextDouble() - 0.5) * 1.3f;
+                    sp.Add(P(x, y));
+                }
+                board.TestStroke(sp.ToArray(), false, true);
+            }
+            check(board.Items.Count == beforeStress + 30,
+                "30 dense jittery pen strokes drawn with no errors (GDI+ fallbacks used: " + StrokeItem.Fallbacks + ")");
+
             board.SetTool(Tool.Pen);
             Directory.CreateDirectory(dir);
             using (var img = board.Export())

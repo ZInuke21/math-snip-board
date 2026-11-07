@@ -537,9 +537,13 @@ namespace MathSnip
             var st = g.Save();
             g.ScaleTransform(zoom, zoom);
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            if (liveStroke != null) { if (liveStroke.Highlight) liveStroke.Draw(g); else liveStroke.DrawTail(g); }
-            if (liveShape != null) liveShape.Draw(g);
-            if (dragItem != null) DrawDragged(g);
+            try   // a drawing hiccup on one frame must never interrupt the lesson
+            {
+                if (liveStroke != null) { if (liveStroke.Highlight) liveStroke.Draw(g); else liveStroke.DrawTail(g); }
+                if (liveShape != null) liveShape.Draw(g);
+                if (dragItem != null) DrawDragged(g);
+            }
+            catch { }
             g.Restore(st);
 
             g.SmoothingMode = SmoothingMode.AntiAlias;
@@ -565,7 +569,7 @@ namespace MathSnip
                 using (var b = new SolidBrush(Color.FromArgb(40, 255, 255, 255))) g.FillEllipse(b, mouse.X - rr, mouse.Y - rr, 2 * rr, 2 * rr);
                 using (var pen = new Pen(Color.FromArgb(150, 60, 64, 72), Math.Max(1.2f, 1.2f * Program.Dpi))) g.DrawEllipse(pen, mouse.X - rr, mouse.Y - rr, 2 * rr, 2 * rr);
             }
-            DrawLaser(g);
+            try { DrawLaser(g); } catch { }
         }
 
         Rectangle SelectionClientRect()
@@ -1085,13 +1089,13 @@ namespace MathSnip
         {
             var s = liveStroke;
             var last = s.Pts[s.Count - 1];
-            if (Geo.Dist(last, p) * zoom < (inputIsPen ? 0.7f : 1.2f)) return;
+            if (!StrokeItem.Finite(p) || Geo.Dist(last, p) * zoom < (inputIsPen ? 1.0f : 1.2f)) return;
             s.Add(p, s.Highlight ? HlWidth : WidthFor(smoothPr));
             if (!s.Highlight)
             {
                 // The piece before the tail is final now: paint it straight onto the page cache.
                 var g = LiveGraphics();
-                using (var pen = Geo.InkPen(s.Ink, 1f)) s.DrawSegment(g, pen, s.Count - 2);
+                using (var pen = Geo.InkPen(s.Ink, 1f)) s.DrawSegment(g, pen, s.Count - 2, StrokeItem.TinyForZoom(zoom));
             }
             InvalidatePage(s.RecentBounds(3));
         }
@@ -1515,7 +1519,11 @@ namespace MathSnip
             if (!alreadyDrawn && cache != null)
             {
                 ReleaseLive();
-                using (var g = Graphics.FromImage(cache)) { PrepCache(g); it.Draw(g); }
+                using (var g = Graphics.FromImage(cache))
+                {
+                    PrepCache(g);
+                    try { it.Draw(g); } catch { DropCache(); }   // worst case: repaint the page from scratch
+                }
             }
             InvalidatePage(it.Bounds);
             Grow(it.Bounds);
@@ -1644,10 +1652,11 @@ namespace MathSnip
         }
 
         // ---------------------------------------------------------------- test hooks (used by --selftest)
-        public void TestStroke(PointF[] clientPts, bool holdAtEnd)
+        public void TestStroke(PointF[] clientPts, bool holdAtEnd, bool pressure = false)
         {
-            BeginInput(clientPts[0], -1f, true, false);
-            for (int i = 1; i < clientPts.Length; i++) MoveInput(clientPts[i], -1f);
+            Func<int, float> pr = i => pressure ? 0.15f + 0.8f * (float)Math.Abs(Math.Sin(i * 0.05)) : -1f;
+            BeginInput(clientPts[0], pr(0), true, false);
+            for (int i = 1; i < clientPts.Length; i++) MoveInput(clientPts[i], pr(i));
             if (holdAtEnd && mode == Mode.Ink)
             {
                 holdSince = Environment.TickCount - 1000;

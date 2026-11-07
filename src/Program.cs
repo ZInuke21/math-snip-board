@@ -37,6 +37,7 @@ namespace MathSnip
             bool selfTest = args.Length > 0 && args[0] == "--selftest";
             if (args.Length >= 2 && args[0] == "--update-check") return Updater.CommandLineCheck(args[1]);
             if (args.Length >= 3 && args[0] == "--parse-release") return Updater.CommandLineParse(args[1], args[2]);
+            if (args.Length >= 2 && args[0] == "--gdi-probe") return GdiProbe.Run(args[1]);
             bool justUpdated = args.Length >= 1 && args[0] == "--updated";
             if (justUpdated && args.Length >= 2)
             {
@@ -136,9 +137,16 @@ namespace MathSnip
             try { SetProcessDPIAware(); } catch { }
         }
 
+        static readonly Dictionary<string, bool> shownErrors = new Dictionary<string, bool>();
+
         public static void ShowError(Exception ex)
         {
             if (ex == null || showingError) return;
+            // Show each distinct problem once per session - never a stream of pop-ups in the middle of a lesson.
+            string[] frames = (ex.StackTrace ?? "").Split('\n');
+            string key = ex.GetType().FullName + "|" + (frames.Length > 0 ? frames[frames.Length > 2 ? 2 : 0].Trim() : "");
+            if (shownErrors.ContainsKey(key)) return;
+            shownErrors[key] = true;
             showingError = true;
             try
             {

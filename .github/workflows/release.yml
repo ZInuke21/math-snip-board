@@ -1,10 +1,12 @@
-# Builds MathSnipBoard.exe on real Windows, runs the self-test, and publishes a GitHub Release.
-# Start it from the Actions tab ("Run workflow", type a version + what's new) or by pushing a tag like v2.2.0.
+# Builds MathSnipBoard.exe on real Windows and runs the self-tests on every push.
+# Publishes a GitHub Release when started from the Actions tab ("Run workflow", type a version + what's new)
+# or by pushing a tag like v2.2.0.
 # Every installed copy of the app picks the new release up through its updater.
 name: Build & release
 
 on:
   push:
+    branches: ['**']     # every push: build + test on Windows (no release)
     tags: ['v*']
   workflow_dispatch:
     inputs:
@@ -36,14 +38,18 @@ jobs:
         id: ver
         shell: pwsh
         run: |
-          if ("${{ github.event_name }}" -eq "workflow_dispatch") { $v = "${{ inputs.version }}".Trim().TrimStart('v','V') }
-          else { $v = "${{ github.ref_name }}".TrimStart('v') }
+          $release = "false"
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") { $v = "${{ inputs.version }}".Trim().TrimStart('v','V'); $release = "true" }
+          elseif ("${{ github.ref_type }}" -eq "tag") { $v = "${{ github.ref_name }}".TrimStart('v'); $release = "true" }
+          else { $v = "0.0.0" }   # test build from a branch push
           if ($v -notmatch '^\d+\.\d+\.\d+$') { throw "Version must look like 2.2.0 (got '$v')" }
           "tag=v$v" >> $env:GITHUB_OUTPUT
+          "release=$release" >> $env:GITHUB_OUTPUT
           (Get-Content src/Version.cs) -replace 'Version\("[0-9.]+"\)', "Version(""$v.0"")" | Set-Content src/Version.cs
           Select-String -Path src/Version.cs -Pattern 'AssemblyVersion'
 
       - name: Make sure this version is new
+        if: steps.ver.outputs.release == 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -64,6 +70,14 @@ jobs:
           if (Test-Path selftest\selftest.log) { Get-Content selftest\selftest.log }
           if ($p.ExitCode -ne 0) { throw "Self-test failed (exit $($p.ExitCode))" }
 
+      - name: GDI+ pen-ink stress probe
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath .\MathSnipBoard.exe -ArgumentList '--gdi-probe', "`"$PWD\gdi-probe.txt`"" -PassThru
+          if (-not $p.WaitForExit(300000)) { $p.Kill(); throw "GDI+ probe timed out" }
+          Get-Content gdi-probe.txt
+          if ($p.ExitCode -ne 0) { throw "Ink drawing raised errors on Windows (exit $($p.ExitCode))" }
+
       - name: Updater can reach GitHub
         shell: pwsh
         run: |
@@ -75,10 +89,13 @@ jobs:
       - name: Upload build
         uses: actions/upload-artifact@v4
         with:
-          name: MathSnipBoard
-          path: MathSnipBoard.exe
+          name: MathSnipBoard-${{ steps.ver.outputs.tag }}-${{ github.run_number }}
+          path: |
+            MathSnipBoard.exe
+            gdi-probe.txt
 
       - name: Publish release
+        if: steps.ver.outputs.release == 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
