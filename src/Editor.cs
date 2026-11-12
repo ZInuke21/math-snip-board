@@ -628,6 +628,36 @@ namespace MathSnip
             board.Undo();
             check(board.Items.Count == before, "undo restores the erased stroke");
 
+            // A drawn line shows a dot at each end; dragging a dot moves only that end (like the Snipping Tool).
+            float z = board.Zoom;
+            board.SetTool(Tool.Line);
+            board.TestStroke(new[] { P(300, 960), P(450, 960), P(600, 960) }, false);
+            var drawn = board.Items[board.Items.Count - 1] as ShapeItem;
+            check(drawn != null && drawn.Kind == ShapeKind.Line && board.ActiveLine == drawn, "a drawn line shows its end dots");
+            int lines = board.Items.Count;
+            board.TestStroke(new[] { P(603, 958), P(650, 1000), P(700, 1060) }, false);
+            var moved = board.Items[board.Items.Count - 1] as ShapeItem;
+            var wantB = P(drawn.B.X + 97 / z, drawn.B.Y + 102 / z);
+            check(board.Items.Count == lines && moved != null && moved != drawn && moved.A == drawn.A &&
+                  Geo.Dist(moved.B, wantB) < 0.5f && board.ActiveLine == moved, "dragging an end dot moves only that end");
+            board.Undo();
+            check(board.Items[board.Items.Count - 1] == drawn, "undo puts the line end back");
+            board.TestStroke(new[] { P(300, 1100), P(500, 1100) }, false);
+            check(board.Items.Count == lines + 1 && board.Items[lines - 1] == drawn, "drawing away from the dots draws a new line");
+            board.Undo();
+            board.SetTool(Tool.Select);
+            board.TestStroke(new[] { P(450, 961), P(460, 971), P(470, 981) }, false);
+            var shifted = board.Items[board.Items.Count - 1] as ShapeItem;
+            check(shifted != null && shifted != drawn && Geo.Dist(shifted.A, P(drawn.A.X + 20 / z, drawn.A.Y + 20 / z)) < 0.5f &&
+                  Geo.Dist(shifted.B, P(drawn.B.X + 20 / z, drawn.B.Y + 20 / z)) < 0.5f, "Select tool drags a whole line");
+            board.DeleteSelected();
+            check(board.Items.Count == lines - 1 && board.ActiveLine == null, "Delete removes the selected line");
+            board.Undo();
+            board.Undo();
+            check(board.Items[board.Items.Count - 1] == drawn, "undo restores the line");
+            board.SetTool(Tool.Pen);
+            check(board.ActiveLine == null, "switching to the pen hides the dots");
+
             // Pen-tablet stress: dense, jittery, pressure-varying samples (what crashed v2.1.0 on Windows).
             int beforeStress = board.Items.Count;
             StrokeItem.Fallbacks = 0;

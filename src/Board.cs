@@ -159,7 +159,7 @@ namespace MathSnip
         Graphics liveG;
 
         // ---------------------------------------------------------------- interaction
-        enum Mode { None, Ink, Shape, Erase, Pan, Move, Resize, Laser }
+        enum Mode { None, Ink, Shape, Erase, Pan, Move, Resize, Laser, LineEdit }
         Mode mode;
         bool inputIsPen, penDown, penApiOk = true, spacePan;
         uint penId;
@@ -182,6 +182,13 @@ namespace MathSnip
         RectangleF dragRect, dragStartRect;
         PointF dragOffset;
         bool haveDevRect;
+
+        // end dots on a straight line/arrow (drag a dot to move that end, like the Snipping Tool)
+        ShapeItem activeLine, lineOrig;
+        int lineGrab, lineIndex;            // grab: 0 = end A, 1 = end B, 2 = whole line (Select tool)
+        List<Item> lineSnapshot;
+        PointF lineGrabStart;
+        bool lineMoved, handleHover;
         PenApi.RECT devRect, dispRect;
 
         // laser pointer
@@ -224,7 +231,7 @@ namespace MathSnip
         public bool CanRedo { get { return redo.Count > 0; } }
         public bool IsTyping { get { return textBox != null; } }
         public bool IsBusy { get { return mode != Mode.None; } }
-        public bool HasSelection { get { return selected != null; } }
+        public bool HasSelection { get { return selected != null || activeLine != null; } }
         public bool HasInk { get { foreach (var it in Items) if (it.IsInk) return true; return false; } }
 
         float PenWidth { get { return PenW[level] * Program.Dpi; } }
@@ -246,6 +253,7 @@ namespace MathSnip
             CommitText();
             CurrentTool = t;
             if (t != Tool.Select && selected != null) { var s = selected; selected = null; InvalidatePage(s.Bounds); }
+            if (t != Tool.Select) SetActiveLine(null);
             if (t == Tool.Laser) laserTimer.Start();
             UpdateCursor();
             Invalidate();
@@ -556,6 +564,7 @@ namespace MathSnip
                 g.FillEllipse(Brushes.White, hr);
                 using (var pen = new Pen(Theme.Accent, Math.Max(2f, 2f * Program.Dpi))) g.DrawEllipse(pen, hr);
             }
+            DrawLineHandles(g);
             if (textBox != null)
             {
                 var r = textBox.Bounds;
@@ -705,7 +714,7 @@ namespace MathSnip
             var pp = ToPage(p);
             Cursor c = Cursors.Default;
             if (selected != null && HandleRect(ToClient(selected.Rect)).Contains(p)) c = Cursors.SizeNWSE;
-            else if (ImageAt(pp) != null) c = Cursors.SizeAll;
+            else if (LineAt(pp) != null || ImageAt(pp) != null) c = Cursors.SizeAll;
             if (Cursor != c) Cursor = c;
         }
 
@@ -848,7 +857,7 @@ namespace MathSnip
             base.OnMouseMove(e);
             if (mode == Mode.None || !inputIsPen) SetMouse(e.Location);
             if (mode != Mode.None && !inputIsPen) MoveInput(e.Location, -1f);
-            else if (mode == Mode.None) UpdateSelectCursor(e.Location);
+            else if (mode == Mode.None && !UpdateHandleCursor(e.Location)) UpdateSelectCursor(e.Location);
         }
 
         protected override void OnMouseUp(MouseEventArgs e)
@@ -897,6 +906,12 @@ namespace MathSnip
             var pp = ToPage(cp);
             if (spacePan) { StartPan(cp); return; }
             Tool t = eraserTip ? Tool.Eraser : CurrentTool;
+            if (t != Tool.Eraser && t != Tool.Laser)
+            {
+                int end = LineHandleAt(cp);
+                if (end >= 0) { BeginLineEdit(activeLine, end, pp); return; }
+            }
+            SetActiveLine(null);   // touching anywhere else puts the dots away
 
             switch (t)
             {
@@ -981,6 +996,9 @@ namespace MathSnip
                 case Mode.Ink:
                     InkMove(pp, pressure);
                     break;
+                case Mode.LineEdit:
+                    LineEditMove(pp);
+                    break;
                 case Mode.Shape:
                     {
                         var old = liveShape.Bounds;
@@ -1027,13 +1045,16 @@ namespace MathSnip
                 case Mode.Ink:
                     InkEnd();
                     break;
+                case Mode.LineEdit:
+                    EndLineEdit();
+                    break;
                 case Mode.Shape:
                     {
                         var s = liveShape;
                         liveShape = null;
                         if (s != null)
                         {
-                            if (Geo.Dist(s.A, s.B) * zoom > 3) CommitItem(s, false);
+                            if (Geo.Dist(s.A, s.B) * zoom > 3) { CommitItem(s, false); if (IsStraight(s)) SetActiveLine(s); }
                             else InvalidatePage(s.Bounds);
                         }
                     }
@@ -1107,7 +1128,7 @@ namespace MathSnip
                 var sh = liveShape;
                 liveShape = null;
                 snapped = false;
-                if (sh != null) CommitItem(sh, false);
+                if (sh != null) { CommitItem(sh, false); if (IsStraight(sh)) SetActiveLine(sh); }
                 return;
             }
             var s = liveStroke;
@@ -1253,6 +1274,13 @@ namespace MathSnip
                 BeginDrag(selected, true, pp);
                 return;
             }
+            var line = LineAt(pp);
+            if (line != null)
+            {
+                if (selected != null) { InvalidatePage(selected.Bounds); selected = null; }
+                BeginLineEdit(line, 2, pp);
+                return;
+            }
             var img = ImageAt(pp);
             if (img != null)
             {
@@ -1367,7 +1395,21 @@ namespace MathSnip
 
         public void DeleteSelected()
         {
-            if (selected == null || mode != Mode.None) return;
+            if (mode != Mode.None) return;
+            if (selected == null && activeLine != null)
+            {
+                var ln = activeLine;
+                SetActiveLine(null);
+                int li = Items.IndexOf(ln);
+                if (li < 0) return;
+                undo.Push(new List<Item>(Items));
+                redo.Clear();
+                Items.RemoveAt(li);
+                RefreshCache(ln.Bounds);
+                Changed();
+                return;
+            }
+            if (selected == null) return;
             int i = Items.IndexOf(selected);
             var s = selected;
             selected = null;
@@ -1381,9 +1423,168 @@ namespace MathSnip
 
         public void ClearSelection()
         {
+            SetActiveLine(null);
             if (selected == null) return;
             InvalidatePage(selected.Bounds);
             selected = null;
+        }
+
+        // ---------------------------------------------------------------- line end dots
+        static bool IsStraight(Item it)
+        {
+            var s = it as ShapeItem;
+            return s != null && (s.Kind == ShapeKind.Line || s.Kind == ShapeKind.Arrow);
+        }
+
+        // The line whose dots are on screen: the one being dragged, or the active one.
+        ShapeItem HandleShape()
+        {
+            if (mode == Mode.LineEdit) return liveShape;
+            if (mode == Mode.None && activeLine != null && Items.Contains(activeLine)) return activeLine;
+            return null;
+        }
+
+        static float HandleR { get { return 7f * Program.Dpi; } }   // same 14px dot as the picture resize handle
+
+        // Which end dot is under a client point: 0 = A, 1 = B, -1 = none.
+        int LineHandleAt(PointF cp)
+        {
+            if (mode != Mode.None) return -1;
+            var s = HandleShape();
+            if (s == null) return -1;
+            float da = Geo.Dist(cp, new PointF(s.A.X * zoom, s.A.Y * zoom));
+            float db = Geo.Dist(cp, new PointF(s.B.X * zoom, s.B.Y * zoom));
+            if (Math.Min(da, db) > HandleR + 5f * Program.Dpi) return -1;   // 24px target (WCAG 2.5.8)
+            return da <= db ? 0 : 1;
+        }
+
+        // Topmost straight line under a page point (a picture on top hides lines under it).
+        ShapeItem LineAt(PointF pp)
+        {
+            float r = 6f * Program.Dpi / zoom;
+            for (int i = Items.Count - 1; i >= 0; i--)
+            {
+                var it = Items[i];
+                if (IsStraight(it) && it.Hit(pp, r)) return (ShapeItem)it;
+                var im = it as ImageItem;
+                if (im != null && im.Rect.Contains(pp)) return null;
+            }
+            return null;
+        }
+
+        void InvalidateHandles(ShapeItem s)
+        {
+            if (s == null) return;
+            int r = (int)Math.Ceiling(HandleR) + Program.S(4);
+            foreach (var p in new[] { s.A, s.B })
+            {
+                int x = (int)(p.X * zoom), y = (int)(p.Y * zoom);
+                Invalidate(new Rectangle(x - r, y - r, 2 * r, 2 * r));
+            }
+        }
+
+        void SetActiveLine(ShapeItem s)
+        {
+            if (s == activeLine) return;
+            InvalidateHandles(activeLine);
+            activeLine = s;
+            InvalidateHandles(s);
+        }
+
+        void DrawLineHandles(Graphics g)
+        {
+            var s = HandleShape();
+            if (s == null) return;
+            float r = HandleR;
+            using (var pen = new Pen(Theme.Accent, Math.Max(2f, 2f * Program.Dpi)))
+                foreach (var p in new[] { s.A, s.B })
+                {
+                    float x = p.X * zoom, y = p.Y * zoom;
+                    g.FillEllipse(Brushes.White, x - r, y - r, 2 * r, 2 * r);
+                    g.DrawEllipse(pen, x - r, y - r, 2 * r, 2 * r);
+                }
+        }
+
+        bool UpdateHandleCursor(Point p)
+        {
+            if (!spacePan && LineHandleAt(p) >= 0)
+            {
+                handleHover = true;
+                if (Cursor != Cursors.SizeAll) Cursor = Cursors.SizeAll;
+                return true;
+            }
+            if (handleHover) { handleHover = false; UpdateCursor(); }
+            return false;
+        }
+
+        // Committed items never change (undo keeps the old list): lift the line out, drag a copy, put the copy back.
+        void BeginLineEdit(ShapeItem s, int grab, PointF pp)
+        {
+            int i = Items.IndexOf(s);
+            if (i < 0) return;
+            SetActiveLine(s);
+            lineSnapshot = new List<Item>(Items);
+            lineIndex = i;
+            lineOrig = s;
+            lineGrab = grab;
+            lineGrabStart = pp;
+            lineMoved = false;
+            Items.RemoveAt(i);
+            liveShape = new ShapeItem(s.Kind, s.A, s.B, s.Ink, s.W);
+            mode = Mode.LineEdit;
+            Cursor = Cursors.SizeAll;
+            RefreshCache(s.Bounds);
+        }
+
+        void LineEditMove(PointF pp)
+        {
+            var s = liveShape;
+            var o = lineOrig;
+            if (s == null || o == null) return;
+            float dx = pp.X - lineGrabStart.X, dy = pp.Y - lineGrabStart.Y;
+            if (!lineMoved && (float)Math.Sqrt(dx * dx + dy * dy) * zoom < 2f) return;   // a tap is not a drag
+            lineMoved = true;
+            var old = s.Bounds;
+            InvalidateHandles(s);
+            bool shift = (ModifierKeys & Keys.Shift) != 0;
+            if (lineGrab == 0) s.A = SnapAngle(o.B, new PointF(o.A.X + dx, o.A.Y + dy), shift);
+            else if (lineGrab == 1) s.B = SnapAngle(o.A, new PointF(o.B.X + dx, o.B.Y + dy), shift);
+            else
+            {
+                s.A = new PointF(o.A.X + dx, o.A.Y + dy);
+                s.B = new PointF(o.B.X + dx, o.B.Y + dy);
+            }
+            InvalidatePage(Geo.Union(old, s.Bounds));
+            InvalidateHandles(s);
+        }
+
+        void EndLineEdit()
+        {
+            var s = liveShape;
+            var o = lineOrig;
+            liveShape = null;
+            lineOrig = null;
+            if (s == null || o == null) return;
+            InvalidateHandles(s);
+            bool changed = lineMoved && Geo.Dist(s.A, s.B) * zoom > 3 && (s.A != o.A || s.B != o.B);
+            if (!changed)
+            {
+                Items = lineSnapshot;
+                activeLine = o;
+                RefreshCache(Geo.Union(o.Bounds, s.Bounds));
+            }
+            else
+            {
+                undo.Push(lineSnapshot);
+                redo.Clear();
+                Items.Insert(Math.Min(lineIndex, Items.Count), s);
+                activeLine = s;
+                Grow(s.Bounds);
+                RefreshCache(Geo.Union(o.Bounds, s.Bounds));
+                Changed();
+            }
+            lineSnapshot = null;
+            InvalidateHandles(activeLine);
         }
 
         void StartPan(PointF cp)
@@ -1540,6 +1741,7 @@ namespace MathSnip
         {
             Items = items;
             if (selected != null && !Items.Contains(selected)) selected = null;
+            if (activeLine != null && !Items.Contains(activeLine)) activeLine = null;
             DropCache();
             Invalidate();
             Changed();
@@ -1664,6 +1866,8 @@ namespace MathSnip
             }
             EndInput();
         }
+
+        public ShapeItem ActiveLine { get { return HandleShape(); } }
 
         public void TestErase(PointF[] clientPts)
         {

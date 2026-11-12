@@ -14,7 +14,7 @@ Owner/maintainer: Mohaneesh (GitHub `ZInuke21`). Public repo: https://github.com
 | Waiting on | Teacher confirming (a) the Update button upgraded him 2.1.0 → 2.1.1 – first real-world run of the updater swap, (b) the error no longer appears |
 | CI | Green on `main`; every push builds + tests on `windows-latest` |
 
-Verified on real Windows (CI): build with the built-in `csc.exe`, 13 self-tests, GDI+ stress probe, updater reaching
+Verified on real Windows (CI): build with the built-in `csc.exe`, 21 self-tests, GDI+ stress probe, updater reaching
 the GitHub API, release publishing. Verified on the teacher's PC: app runs, snipping and pen writing work (the crash
 stack trace came from the live pen path). **Not yet verified on real hardware:** updater exe swap on Windows,
 per-monitor DPI with a projector at different scaling, tray icon + global hotkey behaviour.
@@ -68,7 +68,7 @@ Env var `MATHSNIP_UPDATE_API` overrides the release API URL (for testing the upd
 | `UI.cs` | `Theme` colours/fonts, `Icons` (vector line icons on a 24×24 grid), `ToolButton`, `SwatchButton`, `Divider`, `Toast`, `LogoMark`, `ScrollPanel` |
 | `Overlay.cs` | `SnipOverlay`: full virtual-screen dim + crosshair + size label; Enter = whole monitor |
 | `Model.cs` | `Item` (immutable once committed) → `StrokeItem` (smooth midpoint Béziers, per-point width), `ShapeItem` (line/arrow/rect/ellipse), `TextItem`, `ImageItem`; `Geo` helpers |
-| `Board.cs` | The canvas: page model in page units (= screen px at 100 %), zoom, viewport-sized render cache (visible area + margin), Windows Ink `WM_POINTER` input (coalesced history, HIMETRIC sub-pixel, pressure, eraser end, barrel = eraser), adaptive smoothing, hold-to-perfect line/circle snapping, partial eraser, laser pointer, select/move/resize pictures (ink on a picture moves with it), text editing, undo/redo (list snapshots), export |
+| `Board.cs` | The canvas: page model in page units (= screen px at 100 %), zoom, viewport-sized render cache (visible area + margin), Windows Ink `WM_POINTER` input (coalesced history, HIMETRIC sub-pixel, pressure, eraser end, barrel = eraser), adaptive smoothing, hold-to-perfect line/circle snapping, line/arrow end dots (drag a dot to move that end; Select tool drags the whole line, Delete removes it), partial eraser, laser pointer, select/move/resize pictures (ink on a picture moves with it), text editing, undo/redo (list snapshots), export |
 | `Editor.cs` | Board window: toolbar, palettes (pen vs highlighter), shortcuts, copy/save PNG/JPG/PDF, paste/drag-drop images, fullscreen, update button, `RunSelfTest` |
 | `Launcher.cs` | Start window, tray icon, global hotkey `Ctrl+Alt+S` (fallback `Ctrl+Alt+Shift+S`), hides while a board is open; `HelpForm` |
 | `Updater.cs` | Release check, JSON parsing (regex, no JSON lib), download/verify/swap/restart, `UpdateProgressForm` |
