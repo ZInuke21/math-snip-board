@@ -3,5 +3,8 @@
 *.download
 *.old
 dist/
+builds/
+_archive/
 selftest/
 update-check.txt
+gdi-probe.txt
