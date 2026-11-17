@@ -10,7 +10,7 @@ using System.Windows.Forms;
 
 namespace MathSnip
 {
-    enum Tool { Select, Pen, Highlighter, Line, Arrow, Rect, Ellipse, Text, Eraser, Laser }
+    enum Tool { Select, Pen, Highlighter, Line, Arrow, Rect, Ellipse, Text, Eraser, StrokeEraser, Graph, Laser }
     enum Backdrop { Plain, Grid, Lines, Dots }
 
     static class PenApi
@@ -151,7 +151,7 @@ namespace MathSnip
         int level = 1;
         public bool UsePressure = true;
         public bool Dirty;
-        public event EventHandler HistoryChanged, ZoomChanged;
+        public event EventHandler HistoryChanged, ZoomChanged, ToolChanged;
 
         // ---------------------------------------------------------------- render cache
         Bitmap cache;
@@ -159,12 +159,16 @@ namespace MathSnip
         Graphics liveG;
 
         // ---------------------------------------------------------------- interaction
-        enum Mode { None, Ink, Shape, Erase, Pan, Move, Resize, Laser, LineEdit }
+        enum Mode { None, Ink, Shape, Erase, Pan, Move, Resize, Laser, LineEdit, Graph, MoveItem }
         Mode mode;
         bool inputIsPen, penDown, penApiOk = true, spacePan;
         uint penId;
         StrokeItem liveStroke;
         ShapeItem liveShape;
+        PolyItem livePoly, snapPolyBase;
+        ShapeItem snapShapeBase;
+        PointF snapCenter;
+        float snapDist0;
         bool snapped, holdTried;
         int holdSince;
         PointF holdAnchor;
@@ -190,6 +194,17 @@ namespace MathSnip
         PointF lineGrabStart;
         bool lineMoved, handleHover;
         PenApi.RECT devRect, dispRect;
+
+        // graph box being drawn, and any other item (stroke, text, shape, graph box) being moved with Select
+        GraphItem liveGraph;
+        public GraphStyle GraphStyle = GraphStyle.Grid;
+        PointF graphStart;
+        Item selItem;
+        List<Item> moveSnapshot, moveAttached;
+        Item moveItem;
+        int moveIndex;
+        PointF moveStart, moveDelta;
+        bool strokeErase;
 
         // laser pointer
         class LaserPt { public PointF P; public int T; }
@@ -231,13 +246,14 @@ namespace MathSnip
         public bool CanRedo { get { return redo.Count > 0; } }
         public bool IsTyping { get { return textBox != null; } }
         public bool IsBusy { get { return mode != Mode.None; } }
-        public bool HasSelection { get { return selected != null || activeLine != null; } }
+        public bool HasSelection { get { return selected != null || activeLine != null || selItem != null; } }
+        public static bool IsEraser(Tool t) { return t == Tool.Eraser || t == Tool.StrokeEraser; }
         public bool HasInk { get { foreach (var it in Items) if (it.IsInk) return true; return false; } }
 
         float PenWidth { get { return PenW[level] * Program.Dpi; } }
         float HlWidth { get { return HlW[level] * Program.Dpi; } }
         float TextSize { get { return TextPx[level] * Program.Dpi; } }
-        float EraseClientR { get { return EraserR[level] * Program.Dpi; } }
+        float EraseClientR { get { return EraserR[level] * Program.Dpi * (CurrentTool == Tool.StrokeEraser || (mode == Mode.Erase && strokeErase) ? 0.55f : 1f); } }
 
         float WidthFor(float pressure)
         {
@@ -253,7 +269,7 @@ namespace MathSnip
             CommitText();
             CurrentTool = t;
             if (t != Tool.Select && selected != null) { var s = selected; selected = null; InvalidatePage(s.Bounds); }
-            if (t != Tool.Select) SetActiveLine(null);
+            if (t != Tool.Select) { SetActiveLine(null); SetSelItem(null); }
             if (t == Tool.Laser) laserTimer.Start();
             UpdateCursor();
             Invalidate();
@@ -549,7 +565,10 @@ namespace MathSnip
             {
                 if (liveStroke != null) { if (liveStroke.Highlight) liveStroke.Draw(g); else liveStroke.DrawTail(g); }
                 if (liveShape != null) liveShape.Draw(g);
+                if (livePoly != null) livePoly.Draw(g);
+                if (liveGraph != null) liveGraph.Draw(g);
                 if (dragItem != null) DrawDragged(g);
+                if (moveItem != null) DrawMoved(g);
             }
             catch { }
             g.Restore(st);
@@ -565,6 +584,7 @@ namespace MathSnip
                 using (var pen = new Pen(Theme.Accent, Math.Max(2f, 2f * Program.Dpi))) g.DrawEllipse(pen, hr);
             }
             DrawLineHandles(g);
+            DrawItemSelection(g);
             if (textBox != null)
             {
                 var r = textBox.Bounds;
@@ -599,7 +619,7 @@ namespace MathSnip
             get
             {
                 if (!mouseIn && mode != Mode.Erase) return false;
-                return CurrentTool == Tool.Eraser || mode == Mode.Erase || hoverEraser;
+                return IsEraser(CurrentTool) || mode == Mode.Erase || hoverEraser;
             }
         }
 
@@ -694,6 +714,7 @@ namespace MathSnip
                     case Tool.Select: c = Cursors.Default; break;
                     case Tool.Text: c = Cursors.IBeam; break;
                     case Tool.Eraser:
+                    case Tool.StrokeEraser:
                     case Tool.Laser: c = Cursors2.Blank; break;
                     case Tool.Pen:
                     case Tool.Highlighter: c = Cursors2.Dot; break;
@@ -714,7 +735,7 @@ namespace MathSnip
             var pp = ToPage(p);
             Cursor c = Cursors.Default;
             if (selected != null && HandleRect(ToClient(selected.Rect)).Contains(p)) c = Cursors.SizeNWSE;
-            else if (LineAt(pp) != null || ImageAt(pp) != null) c = Cursors.SizeAll;
+            else if (LineAt(pp) != null || MovableAt(pp) != null || ImageAt(pp) != null) c = Cursors.SizeAll;
             if (Cursor != c) Cursor = c;
         }
 
@@ -905,8 +926,8 @@ namespace MathSnip
             inputIsPen = pen;
             var pp = ToPage(cp);
             if (spacePan) { StartPan(cp); return; }
-            Tool t = eraserTip ? Tool.Eraser : CurrentTool;
-            if (t != Tool.Eraser && t != Tool.Laser)
+            Tool t = eraserTip ? (CurrentTool == Tool.StrokeEraser ? Tool.StrokeEraser : Tool.Eraser) : CurrentTool;
+            if (!IsEraser(t) && t != Tool.Laser)
             {
                 int end = LineHandleAt(cp);
                 if (end >= 0) { BeginLineEdit(activeLine, end, pp); return; }
@@ -927,6 +948,7 @@ namespace MathSnip
                         bool hl = t == Tool.Highlighter;
                         smoothP = pp; lastRaw = pp; smoothPr = pressure;
                         snapped = false; holdTried = false;
+                        livePoly = null; snapDist0 = 0;
                         holdAnchor = pp; holdSince = Environment.TickCount;
                         liveStroke = new StrokeItem(hl ? Color.FromArgb(105, HlColor) : PenColor, hl);
                         liveStroke.Add(pp, hl ? HlWidth : WidthFor(smoothPr));
@@ -945,7 +967,14 @@ namespace MathSnip
                         mode = Mode.Shape;
                     }
                     break;
+                case Tool.Graph:
+                    graphStart = pp;
+                    liveGraph = new GraphItem(new RectangleF(pp, SizeF.Empty), GraphStyle);
+                    mode = Mode.Graph;
+                    break;
                 case Tool.Eraser:
+                case Tool.StrokeEraser:
+                    strokeErase = t == Tool.StrokeEraser;
                     mode = Mode.Erase;
                     eraseSnapshot = new List<Item>(Items);
                     erasedAny = false;
@@ -999,6 +1028,23 @@ namespace MathSnip
                 case Mode.LineEdit:
                     LineEditMove(pp);
                     break;
+                case Mode.MoveItem:
+                    MoveItemMove(pp);
+                    break;
+                case Mode.Graph:
+                    {
+                        var old = liveGraph.Bounds;
+                        var q = pp;
+                        if ((ModifierKeys & Keys.Shift) != 0)
+                        {
+                            float dx = pp.X - graphStart.X, dy = pp.Y - graphStart.Y;
+                            float sd = Math.Max(Math.Abs(dx), Math.Abs(dy));
+                            q = new PointF(graphStart.X + Math.Sign(dx == 0 ? 1 : dx) * sd, graphStart.Y + Math.Sign(dy == 0 ? 1 : dy) * sd);
+                        }
+                        liveGraph = new GraphItem(Geo.Norm(graphStart, q), GraphStyle);
+                        InvalidatePage(Geo.Union(old, liveGraph.Bounds));
+                    }
+                    break;
                 case Mode.Shape:
                     {
                         var old = liveShape.Bounds;
@@ -1048,6 +1094,26 @@ namespace MathSnip
                 case Mode.LineEdit:
                     EndLineEdit();
                     break;
+                case Mode.MoveItem:
+                    EndMoveItem();
+                    break;
+                case Mode.Graph:
+                    {
+                        var gb = liveGraph;
+                        liveGraph = null;
+                        if (gb == null) break;
+                        float minPx = 40 * Program.Dpi;
+                        if (gb.Rect.Width * zoom >= minPx && gb.Rect.Height * zoom >= minPx)
+                        {
+                            var r = gb.Rect;
+                            gb = new GraphItem(new RectangleF((float)Math.Round(r.X), (float)Math.Round(r.Y), (float)Math.Round(r.Width), (float)Math.Round(r.Height)), gb.Style);
+                            SetTool(Tool.Pen);   // ready to draw inside it straight away
+                            CommitItem(gb, false);
+                            if (ToolChanged != null) ToolChanged(this, EventArgs.Empty);
+                        }
+                        else InvalidatePage(gb.Bounds);
+                    }
+                    break;
                 case Mode.Shape:
                     {
                         var s = liveShape;
@@ -1095,6 +1161,7 @@ namespace MathSnip
                     liveShape.B = SnapAngle(liveShape.A, raw, (ModifierKeys & Keys.Shift) != 0);
                     InvalidatePage(Geo.Union(old, liveShape.Bounds));
                 }
+                else if (snapDist0 > 0) ResizeSnapped(raw);
                 return;
             }
             if (liveStroke == null) return;
@@ -1126,9 +1193,13 @@ namespace MathSnip
             if (snapped)
             {
                 var sh = liveShape;
+                var poly = livePoly;
                 liveShape = null;
+                livePoly = null;
+                snapShapeBase = null; snapPolyBase = null; snapDist0 = 0;
                 snapped = false;
                 if (sh != null) { CommitItem(sh, false); if (IsStraight(sh)) SetActiveLine(sh); }
+                else if (poly != null) CommitItem(poly, false);
                 return;
             }
             var s = liveStroke;
@@ -1156,14 +1227,55 @@ namespace MathSnip
             if (shape == null) return;
             var b = liveStroke.Bounds;
             liveStroke = null;
-            liveShape = shape;
             snapped = true;
+            snapDist0 = 0; snapShapeBase = null; snapPolyBase = null;
+            var ss = shape as ShapeItem;
+            if (ss != null)
+            {
+                liveShape = ss;
+                if (ss.Kind != ShapeKind.Line)
+                {
+                    snapShapeBase = new ShapeItem(ss.Kind, ss.A, ss.B, ss.Ink, ss.W);
+                    snapCenter = Geo.Mid(ss.A, ss.B);
+                }
+            }
+            else
+            {
+                livePoly = (PolyItem)shape;
+                snapPolyBase = livePoly;
+                snapCenter = livePoly.Center;
+            }
+            // Keep holding and drag away from / toward the middle to make the shape bigger or smaller.
+            if (snapShapeBase != null || snapPolyBase != null) snapDist0 = Math.Max(Geo.Dist(lastRaw, snapCenter), 12f * Program.Dpi / zoom);
             RefreshCache(b);
             InvalidatePage(shape.Bounds);
         }
 
-        // Turns a held, roughly straight stroke into a perfect line and a roughly round one into a perfect circle/ellipse.
-        ShapeItem TrySnap(StrokeItem s)
+        // Pen still down after a shape snapped: its size follows how far the pen is from the shape's middle.
+        void ResizeSnapped(PointF raw)
+        {
+            float k = Geo.Dist(raw, snapCenter) / snapDist0;
+            if (Math.Abs(k - 1f) < 0.05f) k = 1f;      // keeping still keeps the exact snapped size
+            k = Math.Max(0.15f, Math.Min(12f, k));
+            if (snapShapeBase != null && liveShape != null)
+            {
+                var old = liveShape.Bounds;
+                var b = snapShapeBase;
+                liveShape.A = new PointF(snapCenter.X + (b.A.X - snapCenter.X) * k, snapCenter.Y + (b.A.Y - snapCenter.Y) * k);
+                liveShape.B = new PointF(snapCenter.X + (b.B.X - snapCenter.X) * k, snapCenter.Y + (b.B.Y - snapCenter.Y) * k);
+                InvalidatePage(Geo.Union(old, liveShape.Bounds));
+            }
+            else if (snapPolyBase != null && livePoly != null)
+            {
+                var old = livePoly.Bounds;
+                livePoly = snapPolyBase.ScaledAbout(snapCenter, k);
+                InvalidatePage(Geo.Union(old, livePoly.Bounds));
+            }
+        }
+
+        // Turns a held stroke into a clean shape: roughly straight -> line, round -> circle/ellipse,
+        // four-sided loop -> rectangle/square, three-sided loop -> triangle.
+        Item TrySnap(StrokeItem s)
         {
             var pts = s.Pts;
             int n = pts.Count;
@@ -1178,7 +1290,7 @@ namespace MathSnip
             {
                 float maxDev = 0;
                 foreach (var p in pts) maxDev = Math.Max(maxDev, Geo.SegDist(p, a, b));
-                if (maxDev <= Math.Max(6 * px, chord * 0.06f) && path < chord * 1.25f)
+                if (maxDev <= Math.Max(9 * px, chord * 0.08f) && path < chord * 1.3f)
                 {
                     var end = SnapAngle(a, b, false);
                     return new ShapeItem(ShapeKind.Line, a, end, s.Ink, s.Highlight ? s.Ws[0] : PenWidth);
@@ -1190,7 +1302,29 @@ namespace MathSnip
             foreach (var p in pts) { x0 = Math.Min(x0, p.X); y0 = Math.Min(y0, p.Y); x1 = Math.Max(x1, p.X); y1 = Math.Max(y1, p.Y); }
             float rx = (x1 - x0) / 2, ry = (y1 - y0) / 2;
             if (Math.Min(rx, ry) * 2 < 24 * px) return null;
-            if (chord > 0.3f * (rx + ry)) return null;                    // must be (nearly) closed
+
+            // Four corners first (it checks the stroke really hugs a box, which a circle never does), then round, then three corners.
+            if (chord <= 0.55f * (rx + ry))
+            {
+                var box = TrySnapRect(pts, path, px, s.Ink);
+                if (box != null) return box;
+            }
+            if (chord <= 0.35f * (rx + ry))
+            {
+                var round = TrySnapEllipse(pts, x0, y0, rx, ry, path, chord, s.Ink);
+                if (round != null) return round;
+            }
+            if (chord <= 0.55f * (rx + ry))
+            {
+                var tri = TrySnapTriangle(pts, path, px, s.Ink, Math.Max(rx, ry));
+                if (tri != null) return tri;
+            }
+            return null;
+        }
+
+        ShapeItem TrySnapEllipse(List<PointF> pts, float x0, float y0, float rx, float ry, float path, float chord, Color ink)
+        {
+            int n = pts.Count;
             float cx = x0 + rx, cy = y0 + ry;
             double sum = 0, sum2 = 0;
             var bins = new bool[16];
@@ -1205,11 +1339,154 @@ namespace MathSnip
             double mean = sum / n, std = Math.Sqrt(Math.Max(0, sum2 / n - mean * mean));
             int covered = 0;
             foreach (var bb in bins) if (bb) covered++;
-            if (covered < 14 || Math.Abs(mean - 1) > 0.15 || std > 0.1) return null;
+            if (covered < 13 || Math.Abs(mean - 1) > 0.18 || std > 0.13) return null;
             double perim = Math.PI * (3 * (rx + ry) - Math.Sqrt((3 * rx + ry) * (rx + 3 * ry)));
-            if (path < perim * 0.8 || path > perim * 1.4) return null;
+            if (path < perim * 0.75 || path > perim * 1.5) return null;
             if (Math.Abs(rx - ry) / Math.Max(rx, ry) < 0.12f) { float r = (rx + ry) / 2; rx = ry = r; }
-            return new ShapeItem(ShapeKind.Ellipse, new PointF(cx - rx, cy - ry), new PointF(cx + rx, cy + ry), s.Ink, PenWidth);
+            return new ShapeItem(ShapeKind.Ellipse, new PointF(cx - rx, cy - ry), new PointF(cx + rx, cy + ry), ink, PenWidth);
+        }
+
+        // A closed four-sided loop becomes a clean rectangle (a square if it is nearly one). Built to forgive a pen:
+        // it finds the four corners as the extreme points along the diagonals, so bowed, uneven or overshooting sides
+        // do not matter. What it checks is that the stroke follows the four sides loosely and really visits all four corners
+        // (a circle bulges ~20% of a side away from the nearest side of its corner-box, so it never passes).
+        // Roughly upright boxes become an exact rectangle; a box drawn tilted becomes a tilted four-sided outline.
+        Item TrySnapRect(List<PointF> pts, float path, float px, Color ink)
+        {
+            Item best = null;
+            float bestScore = 0;
+            foreach (float deg in new float[] { 0f, -15f, 15f, -30f, 30f, 45f })
+            {
+                float score;
+                var item = TryQuadAt(pts, path, px, ink, deg, out score);
+                if (item == null) continue;
+                if (deg == 0f) return item;           // upright wins as soon as it fits
+                if (score > bestScore) { bestScore = score; best = item; }
+            }
+            return best;
+        }
+
+        Item TryQuadAt(List<PointF> pts, float path, float px, Color ink, float deg, out float score)
+        {
+            score = 0;
+            int n = pts.Count;
+            double th = deg * Math.PI / 180.0, cs = Math.Cos(th), sn = Math.Sin(th);
+            var q = new PointF[n];
+            for (int i = 0; i < n; i++) q[i] = new PointF((float)(pts[i].X * cs + pts[i].Y * sn), (float)(-pts[i].X * sn + pts[i].Y * cs));
+            int tl = 0, tr = 0, br = 0, bl = 0;
+            for (int i = 1; i < n; i++)
+            {
+                if (q[i].X + q[i].Y < q[tl].X + q[tl].Y) tl = i;
+                if (q[i].X - q[i].Y > q[tr].X - q[tr].Y) tr = i;
+                if (q[i].X + q[i].Y > q[br].X + q[br].Y) br = i;
+                if (q[i].X - q[i].Y < q[bl].X - q[bl].Y) bl = i;
+            }
+            var c = new[] { q[tl], q[tr], q[br], q[bl] };
+            float perim = 0, minSide = float.MaxValue;
+            for (int i = 0; i < 4; i++) { float d = Geo.Dist(c[i], c[(i + 1) % 4]); perim += d; minSide = Math.Min(minSide, d); }
+            if (minSide < 24 * px) return null;
+            // the corners must really be corners: close to right angles
+            for (int i = 0; i < 4; i++)
+            {
+                var a = c[(i + 3) % 4]; var b = c[i]; var d = c[(i + 1) % 4];
+                double ang = Math.Abs(Math.Atan2(a.Y - b.Y, a.X - b.X) - Math.Atan2(d.Y - b.Y, d.X - b.X));
+                if (ang > Math.PI) ang = 2 * Math.PI - ang;
+                if (ang < 55 * Math.PI / 180 || ang > 125 * Math.PI / 180) return null;
+            }
+            if (path < perim * 0.75f || path > perim * 1.8f) return null;
+            float tol = Math.Max(10 * px, perim / 4f * 0.14f);
+            int near = 0;
+            var side = new int[4];
+            foreach (var p in q)
+            {
+                float bd = float.MaxValue; int bi = 0;
+                for (int i = 0; i < 4; i++)
+                {
+                    float d = Geo.SegDist(p, c[i], c[(i + 1) % 4]);
+                    if (d < bd) { bd = d; bi = i; }
+                }
+                if (bd <= tol) { near++; side[bi]++; }
+            }
+            if (near < n * 0.85f) return null;
+            for (int i = 0; i < 4; i++) if (side[i] < n * 0.08f) return null;     // all four sides were drawn
+            score = near / (float)n;
+
+            if (deg == 0f)
+            {
+                float x0 = (c[0].X + c[3].X) / 2f, x1 = (c[1].X + c[2].X) / 2f, y0 = (c[0].Y + c[1].Y) / 2f, y1 = (c[3].Y + c[2].Y) / 2f;
+                float w = x1 - x0, h = y1 - y0;
+                if (w < 24 * px || h < 24 * px) return null;
+                if (Math.Abs(w - h) / Math.Max(w, h) < 0.2f)
+                {
+                    float sd = (w + h) / 2f, cx = x0 + w / 2f, cy = y0 + h / 2f;
+                    x0 = cx - sd / 2f; x1 = cx + sd / 2f; y0 = cy - sd / 2f; y1 = cy + sd / 2f;
+                }
+                return new ShapeItem(ShapeKind.Rect, new PointF(x0, y0), new PointF(x1, y1), ink, PenWidth);
+            }
+            var outp = new PointF[4];
+            for (int i = 0; i < 4; i++) outp[i] = new PointF((float)(c[i].X * cs - c[i].Y * sn), (float)(c[i].X * sn + c[i].Y * cs));
+            return new PolyItem(outp, ink, PenWidth);
+        }
+
+        // Three clear corners (found by simplifying the path) with the whole stroke hugging the three sides.
+        PolyItem TrySnapTriangle(List<PointF> pts, float path, float px, Color ink, float size)
+        {
+            int n = pts.Count;
+            float eps = Math.Max(9 * px, size * 0.17f);
+            // split the loop at the point farthest from the start so both halves are simple open curves
+            int far = 0; float fd = 0;
+            for (int i = 0; i < n; i++) { float d = Geo.Dist(pts[i], pts[0]); if (d > fd) { fd = d; far = i; } }
+            if (far < 2 || far > n - 3) return null;
+            var v = new List<PointF> { pts[0] };
+            Rdp(pts, 0, far, eps, v);
+            Rdp(pts, far, n - 1, eps, v);
+            if (v.Count >= 2 && Geo.Dist(v[0], v[v.Count - 1]) < eps * 3f) v.RemoveAt(v.Count - 1);   // closing point / overshoot tail
+            // drop vertices that are not real corners (e.g. the start point sitting in the middle of a side)
+            while (v.Count > 3)
+            {
+                int worst = -1; float wd = float.MaxValue;
+                for (int i = 0; i < v.Count; i++)
+                {
+                    var prev = v[(i + v.Count - 1) % v.Count]; var next = v[(i + 1) % v.Count];
+                    float d = Geo.SegDist(v[i], prev, next);
+                    if (d < wd) { wd = d; worst = i; }
+                }
+                if (wd > eps * 1.2f) break;
+                v.RemoveAt(worst);
+            }
+            if (v.Count != 3) return null;
+            float perim = 0, minSide = float.MaxValue;
+            for (int i = 0; i < 3; i++) { float d = Geo.Dist(v[i], v[(i + 1) % 3]); perim += d; minSide = Math.Min(minSide, d); }
+            if (minSide < 24 * px) return null;
+            if (path < perim * 0.8f || path > perim * 1.7f) return null;
+            // no sliver triangles: every corner needs a decent angle
+            for (int i = 0; i < 3; i++)
+            {
+                var a = v[i]; var b = v[(i + 1) % 3]; var c = v[(i + 2) % 3];
+                double ang = Math.Abs(Math.Atan2(b.Y - a.Y, b.X - a.X) - Math.Atan2(c.Y - a.Y, c.X - a.X));
+                if (ang > Math.PI) ang = 2 * Math.PI - ang;
+                if (ang < 22 * Math.PI / 180) return null;
+            }
+            int near = 0;
+            foreach (var p in pts)
+            {
+                float d = Math.Min(Geo.SegDist(p, v[0], v[1]), Math.Min(Geo.SegDist(p, v[1], v[2]), Geo.SegDist(p, v[2], v[0])));
+                if (d <= eps * 1.1f) near++;
+            }
+            if (near < n * 0.85f) return null;
+            return new PolyItem(v.ToArray(), ink, PenWidth);
+        }
+
+        static void Rdp(List<PointF> p, int a, int b, float eps, List<PointF> outv)
+        {
+            float md = 0; int mi = -1;
+            for (int i = a + 1; i < b; i++)
+            {
+                float d = Geo.SegDist(p[i], p[a], p[b]);
+                if (d > md) { md = d; mi = i; }
+            }
+            if (mi >= 0 && md > eps) { Rdp(p, a, mi, eps, outv); Rdp(p, mi, b, eps, outv); }
+            else outv.Add(p[b]);
         }
 
         // Lines snap to exactly horizontal/vertical when close; Shift snaps to 45 degree steps.
@@ -1251,6 +1528,14 @@ namespace MathSnip
                 var bb = b;
                 bb.Inflate(r, r);
                 if (!bb.Contains(p)) continue;
+                if (strokeErase)
+                {
+                    // whole-item eraser: touch any part of the topmost item and all of it goes
+                    if (!it.Hit(p, r)) continue;
+                    Items.RemoveAt(i);
+                    dirty = Geo.Union(dirty, b);
+                    break;
+                }
                 var s = it as StrokeItem;
                 if (s != null)
                 {
@@ -1281,16 +1566,159 @@ namespace MathSnip
                 BeginLineEdit(line, 2, pp);
                 return;
             }
+            var hitItem = MovableAt(pp);
+            if (hitItem != null)
+            {
+                if (selected != null) { InvalidatePage(selected.Bounds); selected = null; }
+                BeginMoveItem(hitItem, pp);
+                return;
+            }
             var img = ImageAt(pp);
             if (img != null)
             {
+                SetSelItem(null);
                 if (selected != null) InvalidatePage(selected.Bounds);
                 selected = img;
                 BeginDrag(img, false, pp);
                 return;
             }
             if (selected != null) { InvalidatePage(selected.Bounds); selected = null; }
+            SetSelItem(null);
             StartPan(cp);
+        }
+
+        // ---------------------------------------------------------------- move any item with Select
+        // Topmost movable thing under a page point that is not a picture: pen strokes, text, rectangles,
+        // circles and graph boxes. (Straight lines have their own end dots and are handled before this.)
+        Item MovableAt(PointF pp)
+        {
+            float r = 8f * Program.Dpi / zoom;
+            for (int i = Items.Count - 1; i >= 0; i--)
+            {
+                var it = Items[i];
+                if (it is ImageItem) { if (((ImageItem)it).Rect.Contains(pp)) return null; continue; }
+                if (IsStraight(it)) continue;
+                if (it.Hit(pp, r)) return it;
+            }
+            return null;
+        }
+
+        void SetSelItem(Item it)
+        {
+            if (it == selItem) return;
+            if (selItem != null) InvalidatePage(selItem.Bounds);
+            selItem = it;
+            if (it != null) InvalidatePage(it.Bounds);
+        }
+
+        void BeginMoveItem(Item it, PointF pp)
+        {
+            int i = Items.IndexOf(it);
+            if (i < 0) return;
+            SetSelItem(null);
+            moveSnapshot = new List<Item>(Items);
+            moveIndex = i;
+            moveAttached = new List<Item>();
+            var dirty = it.Bounds;
+            var gb = it as GraphItem;
+            if (gb != null)
+            {
+                // writing on the graph box travels with it
+                for (int k = Items.Count - 1; k > i; k--)
+                {
+                    var a = Items[k];
+                    if (!a.IsInk || !IsOnPicture(a.Bounds, gb.Rect)) continue;
+                    moveAttached.Insert(0, a);
+                    dirty = Geo.Union(dirty, a.Bounds);
+                    Items.RemoveAt(k);
+                }
+            }
+            Items.RemoveAt(i);
+            moveItem = it;
+            moveStart = pp;
+            moveDelta = PointF.Empty;
+            mode = Mode.MoveItem;
+            Cursor = Cursors.SizeAll;
+            RefreshCache(dirty);
+        }
+
+        RectangleF MoveArea()
+        {
+            var r = RectangleF.Empty;
+            var b = moveItem.Bounds;
+            b.Offset(moveDelta.X, moveDelta.Y);
+            r = Geo.Union(r, b);
+            foreach (var a in moveAttached)
+            {
+                var ab = a.Bounds;
+                ab.Offset(moveDelta.X, moveDelta.Y);
+                r = Geo.Union(r, ab);
+            }
+            return r;
+        }
+
+        void MoveItemMove(PointF pp)
+        {
+            var old = MoveArea();
+            float dx = pp.X - moveStart.X, dy = pp.Y - moveStart.Y;
+            if (moveItem is GraphItem) { dx = (float)Math.Round(dx); dy = (float)Math.Round(dy); }
+            moveDelta = new PointF(dx, dy);
+            var area = Geo.Union(old, MoveArea());
+            area.Inflate(4, 4);
+            InvalidatePage(area);
+        }
+
+        void DrawMoved(Graphics g)
+        {
+            var st = g.Save();
+            g.TranslateTransform(moveDelta.X, moveDelta.Y);
+            moveItem.Draw(g);
+            foreach (var a in moveAttached) a.Draw(g);
+            g.Restore(st);
+        }
+
+        void EndMoveItem()
+        {
+            var it = moveItem;
+            moveItem = null;
+            var attached = moveAttached ?? new List<Item>();
+            moveAttached = null;
+            if (it == null) return;
+            var oldArea = it.Bounds;
+            foreach (var a in attached) oldArea = Geo.Union(oldArea, a.Bounds);
+            if (moveDelta.X * moveDelta.X + moveDelta.Y * moveDelta.Y < 4f / (zoom * zoom))   // a tap is not a drag
+            {
+                Items = moveSnapshot;
+                moveSnapshot = null;
+                RefreshCache(oldArea);
+                SetSelItem(it);
+                return;
+            }
+            undo.Push(moveSnapshot);
+            moveSnapshot = null;
+            redo.Clear();
+            PointF from = PointF.Empty, to = moveDelta;
+            var moved = it.Transformed(from, to, 1f);
+            Items.Insert(Math.Min(moveIndex, Items.Count), moved);
+            var newArea = moved.Bounds;
+            foreach (var a in attached)
+            {
+                var t = a.Transformed(from, to, 1f);
+                Items.Add(t);
+                newArea = Geo.Union(newArea, t.Bounds);
+            }
+            Grow(newArea);
+            RefreshCache(Geo.Union(oldArea, newArea));
+            SetSelItem(moved);
+            Changed();
+        }
+
+        void DrawItemSelection(Graphics g)
+        {
+            if (selItem == null || mode != Mode.None || CurrentTool != Tool.Select) return;
+            var b = ToClient(selItem.Bounds);
+            using (var pen = new Pen(Theme.Accent, Math.Max(1.5f, 1.5f * Program.Dpi)) { DashStyle = DashStyle.Dash })
+                g.DrawRectangle(pen, b.X, b.Y, b.Width, b.Height);
         }
 
         void BeginDrag(ImageItem img, bool resize, PointF pp)
@@ -1396,6 +1824,19 @@ namespace MathSnip
         public void DeleteSelected()
         {
             if (mode != Mode.None) return;
+            if (selected == null && activeLine == null && selItem != null)
+            {
+                int si = Items.IndexOf(selItem);
+                var sit = selItem;
+                SetSelItem(null);
+                if (si < 0) return;
+                undo.Push(new List<Item>(Items));
+                redo.Clear();
+                Items.RemoveAt(si);
+                RefreshCache(sit.Bounds);
+                Changed();
+                return;
+            }
             if (selected == null && activeLine != null)
             {
                 var ln = activeLine;
@@ -1424,6 +1865,7 @@ namespace MathSnip
         public void ClearSelection()
         {
             SetActiveLine(null);
+            SetSelItem(null);
             if (selected == null) return;
             InvalidatePage(selected.Bounds);
             selected = null;
@@ -1742,6 +2184,7 @@ namespace MathSnip
             Items = items;
             if (selected != null && !Items.Contains(selected)) selected = null;
             if (activeLine != null && !Items.Contains(activeLine)) activeLine = null;
+            if (selItem != null && !Items.Contains(selItem)) selItem = null;
             DropCache();
             Invalidate();
             Changed();
@@ -1877,6 +2320,52 @@ namespace MathSnip
             for (int i = 1; i < clientPts.Length; i++) MoveInput(clientPts[i], -1f);
             EndInput();
             CurrentTool = t;
+        }
+
+        // Draw, hold still until it snaps, keep the pen down and move it, then lift.
+        public void TestHoldThenDrag(PointF[] clientPts, PointF[] afterHold)
+        {
+            BeginInput(clientPts[0], -1f, true, false);
+            for (int i = 1; i < clientPts.Length; i++) MoveInput(clientPts[i], -1f);
+            if (mode == Mode.Ink)
+            {
+                holdSince = Environment.TickCount - 1000;
+                HoldTick(this, EventArgs.Empty);
+            }
+            foreach (var q in afterHold) MoveInput(q, -1f);
+            EndInput();
+        }
+
+        public void TestStrokeErase(PointF[] clientPts)
+        {
+            var t = CurrentTool;
+            CurrentTool = Tool.StrokeEraser;
+            BeginInput(clientPts[0], -1f, true, false);
+            for (int i = 1; i < clientPts.Length; i++) MoveInput(clientPts[i], -1f);
+            EndInput();
+            CurrentTool = t;
+        }
+
+        // Drive Select with a drag in client coordinates (self-test).
+        public void TestSelectDrag(PointF from, PointF to)
+        {
+            var t = CurrentTool;
+            CurrentTool = Tool.Select;
+            BeginInput(from, -1f, true, false);
+            MoveInput(to, -1f);
+            EndInput();
+            CurrentTool = t;
+        }
+
+        public void TestDrawGraph(PointF a, PointF b, GraphStyle style)
+        {
+            var st = GraphStyle;
+            GraphStyle = style;
+            CurrentTool = Tool.Graph;
+            BeginInput(a, -1f, true, false);
+            MoveInput(b, -1f);
+            EndInput();
+            GraphStyle = st;
         }
 
         protected override void Dispose(bool disposing)

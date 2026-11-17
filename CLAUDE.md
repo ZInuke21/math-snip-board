@@ -75,6 +75,17 @@ Env var `MATHSNIP_UPDATE_API` overrides the release API URL (for testing the upd
 | `Pdf.cs` | Minimal one-page PDF writer (embedded JPEG); `SelfTest.Run` |
 | `Diagnostics.cs` | `--gdi-probe`: raw vs fixed ink drawing stress test |
 
+Added in v2.2.0: hold-to-snap now also makes boxes (`TrySnapRect`: finds 4 corners as diagonal extremes, tolerant of bowed
+sides; upright -> `ShapeItem` Rect, tilted -> `PolyItem`) and triangles (`TrySnapTriangle`, RDP corners, `PolyItem`); order is
+line -> box -> circle -> triangle (the box test must run before the circle test or a loose circle test swallows squares).
+While the pen stays down after a snap, `ResizeSnapped` scales the shape by pen distance from its centre; it commits on lift.
+`GraphItem` (tool `B`, style dropdown grid/axes/lines/dots/blank) is a non-ink paper box that carries writing on it when
+moved. Select (`MovableAt`/`BeginMoveItem`) moves any stroke/text/rect/circle/triangle/graph box; Delete removes it. Eraser
+is a split button: `Tool.Eraser` (rub out) / `Tool.StrokeEraser` (`Shift+E`, removes the whole topmost item touched).
+Snips on the board are plain (no shadow or border). Graph boxes cannot be resized yet. Not yet tried on real pen hardware.
+Dev builds are v2.1.0 so they offer the Update button and will overwrite themselves with the release: run them with
+`MATHSNIP_UPDATE_API=http://127.0.0.1:9/none`.
+
 Data flow: input → `Board.BeginInput/MoveInput/EndInput` → live `StrokeItem` painted incrementally into the cache
 → `CommitItem` pushes an undo snapshot. Anything that changes items must push `undo` and call `Changed()`.
 

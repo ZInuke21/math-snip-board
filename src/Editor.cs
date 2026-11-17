@@ -39,6 +39,8 @@ namespace MathSnip
         readonly List<SwatchButton> swatches = new List<SwatchButton>();
         SwatchButton customSwatch;
         readonly ToolButton[] sizeBtns = new ToolButton[3];
+        ToolButton eraserBtn, graphBtn;
+        Tool eraserChoice = Tool.Eraser;
         ToolButton undoBtn, redoBtn, clearBtn, pressureBtn, bgBtn, zoomBtn, fullBtn, updateBtn;
         Bitmap initial;
         bool fullscreen;
@@ -90,6 +92,7 @@ namespace MathSnip
             Controls.Add(bar);
 
             board.HistoryChanged += delegate { RefreshUi(); };
+            board.ToolChanged += delegate { RefreshUi(); };
             board.ZoomChanged += delegate { RefreshZoom(); };
             scroller.Resize += delegate { board.ApplySize(); toast.Reposition(); };
             scroller.ClientSizeChanged += delegate { board.ApplySize(); };   // scrollbars appearing/disappearing
@@ -151,7 +154,7 @@ namespace MathSnip
             Add(snip, "Snip another part of the screen onto this board (Ctrl+N)");
             Add(new Divider());
 
-            AddTool(Tool.Select, "select", "Select – move or resize pictures, drag empty space to scroll (V)");
+            AddTool(Tool.Select, "select", "Select – move or resize anything you drew or pasted, drag empty space to scroll (V)");
             AddTool(Tool.Pen, "pen", "Pen (P)");
             AddTool(Tool.Highlighter, "highlighter", "Highlighter (H)");
             AddTool(Tool.Line, "line", "Straight line (L) – hold Shift for 45° angles");
@@ -159,7 +162,16 @@ namespace MathSnip
             AddTool(Tool.Rect, "rect", "Rectangle (R) – hold Shift for a square");
             AddTool(Tool.Ellipse, "ellipse", "Circle / ellipse (O) – hold Shift for a perfect circle");
             AddTool(Tool.Text, "text", "Text (T) – click to type, Enter to finish, Shift+Enter for a new line");
-            AddTool(Tool.Eraser, "eraser", "Eraser (E) – rubs out just the bit you touch");
+
+            graphBtn = new ToolButton("graph") { DropArrow = true };
+            graphBtn.AutoFit();
+            graphBtn.Click += delegate { DropOrRun(graphBtn, ShowGraphMenu, delegate { SelectTool(Tool.Graph); }); };
+            Add(graphBtn, "Graph box (B) – drag out a square of graph paper, lines or dots to draw in. Arrow: choose the paper");
+
+            eraserBtn = new ToolButton("eraser") { DropArrow = true };
+            eraserBtn.AutoFit();
+            eraserBtn.Click += delegate { DropOrRun(eraserBtn, ShowEraserMenu, delegate { SelectTool(eraserChoice); }); };
+            Add(eraserBtn, "Eraser (E) – arrow: rub out a bit, or wipe a whole line, shape or word with one touch (Shift+E)");
             AddTool(Tool.Laser, "laser", "Laser pointer (K) – point at things without drawing");
             Add(new Divider());
 
@@ -250,7 +262,7 @@ namespace MathSnip
 
         void PickColor(Color c)
         {
-            if (board.CurrentTool == Tool.Select || board.CurrentTool == Tool.Eraser || board.CurrentTool == Tool.Laser)
+            if (board.CurrentTool == Tool.Select || Board.IsEraser(board.CurrentTool) || board.CurrentTool == Tool.Graph || board.CurrentTool == Tool.Laser)
                 board.SetTool(Tool.Pen);
             board.SetColor(c);
             Program.Settings.PenColor = board.PenColor.ToArgb();
@@ -274,10 +286,14 @@ namespace MathSnip
         void RefreshUi()
         {
             foreach (var kv in toolBtns) kv.Value.Checked = kv.Key == board.CurrentTool;
+            if (Board.IsEraser(board.CurrentTool)) eraserChoice = board.CurrentTool;
+            eraserBtn.Checked = Board.IsEraser(board.CurrentTool);
+            eraserBtn.SetIcon(eraserChoice == Tool.StrokeEraser ? "eraser2" : "eraser");
+            graphBtn.Checked = board.CurrentTool == Tool.Graph;
             bool hl = board.CurrentTool == Tool.Highlighter;
             var pal = hl ? HlColors : PenColors;
             var active = board.ActiveColor.ToArgb();
-            bool showSel = board.CurrentTool != Tool.Select && board.CurrentTool != Tool.Eraser && board.CurrentTool != Tool.Laser;
+            bool showSel = board.CurrentTool != Tool.Select && !Board.IsEraser(board.CurrentTool) && board.CurrentTool != Tool.Graph && board.CurrentTool != Tool.Laser;
             bool matched = false;
             for (int i = 0; i < swatches.Count; i++)
             {
@@ -300,6 +316,41 @@ namespace MathSnip
         void RefreshZoom()
         {
             zoomBtn.Text = (int)Math.Round(board.Zoom * 100) + "%";
+        }
+
+        // A split button: the arrow opens the menu, the rest of the button just uses the current choice.
+        void DropOrRun(ToolButton b, Action<ToolButton> menu, Action run)
+        {
+            if (b.PointToClient(Cursor.Position).X >= b.Width - Program.S(16)) menu(b);
+            else run();
+        }
+
+        void ShowEraserMenu(ToolButton anchor)
+        {
+            var menu = new ContextMenuStrip { Font = Theme.Body, ShowImageMargin = false, ShowCheckMargin = true };
+            var rub = new ToolStripMenuItem("Rub out  (E)") { Checked = eraserChoice == Tool.Eraser, ToolTipText = "Erases just the part you drag over" };
+            rub.Click += delegate { SelectTool(Tool.Eraser); };
+            var whole = new ToolStripMenuItem("Whole line or shape  (Shift+E)") { Checked = eraserChoice == Tool.StrokeEraser };
+            whole.Click += delegate { SelectTool(Tool.StrokeEraser); };
+            menu.Items.Add(rub);
+            menu.Items.Add(whole);
+            menu.Closed += delegate { BeginInvoke(new Action(menu.Dispose)); };
+            menu.Show(anchor, new Point(0, anchor.Height));
+        }
+
+        void ShowGraphMenu(ToolButton anchor)
+        {
+            var menu = new ContextMenuStrip { Font = Theme.Body, ShowImageMargin = false, ShowCheckMargin = true };
+            string[] labels = { "Graph paper", "Graph paper with axes", "Lines", "Dots", "Blank" };
+            for (int i = 0; i < labels.Length; i++)
+            {
+                var st = (GraphStyle)i;
+                var item = new ToolStripMenuItem(labels[i]) { Checked = board.GraphStyle == st };
+                item.Click += delegate { board.GraphStyle = st; SelectTool(Tool.Graph); };
+                menu.Items.Add(item);
+            }
+            menu.Closed += delegate { BeginInvoke(new Action(menu.Dispose)); };
+            menu.Show(anchor, new Point(0, anchor.Height));
         }
 
         void ShowBackdropMenu()
@@ -522,6 +573,8 @@ namespace MathSnip
                 case Keys.O: SelectTool(Tool.Ellipse); return true;
                 case Keys.T: SelectTool(Tool.Text); return true;
                 case Keys.E: SelectTool(Tool.Eraser); return true;
+                case Keys.Shift | Keys.E: SelectTool(Tool.StrokeEraser); return true;
+                case Keys.B: SelectTool(Tool.Graph); return true;
                 case Keys.K: SelectTool(Tool.Laser); return true;
                 case Keys.G: SetBackdrop((Backdrop)(((int)board.Backdrop + 1) % 4)); return true;
                 case Keys.D1: case Keys.NumPad1: board.SetLevel(0); Program.Settings.Level = 0; RefreshUi(); return true;
@@ -582,7 +635,7 @@ namespace MathSnip
         {
             Func<float, float, PointF> P = (x, y) => new PointF(x, y);
             var log = new List<string>();
-            Action<bool, string> check = (ok, what) => { log.Add((ok ? "PASS " : "FAIL ") + what); if (!ok) throw new Exception("self-test failed: " + what); };
+            Action<bool, string> check = (ok, what) => { log.Add((ok ? "PASS " : "FAIL ") + what); if (!ok) { try { Directory.CreateDirectory(dir); File.WriteAllLines(Path.Combine(dir, "selftest.log"), log.ToArray()); } catch { } throw new Exception("self-test failed: " + what); } };
 
             int start = board.Items.Count;
             check(start == 1, "initial snip is on the board");
@@ -657,6 +710,153 @@ namespace MathSnip
             check(board.Items[board.Items.Count - 1] == drawn, "undo restores the line");
             board.SetTool(Tool.Pen);
             check(board.ActiveLine == null, "switching to the pen hides the dots");
+
+            // A wobbly, held square snaps to a clean square; a held circle is still a circle, not a box.
+            board.SetTool(Tool.Pen);
+            pts.Clear();
+            var rn = new Random(3);
+            Func<float, float> jit = v => v + (float)(rn.NextDouble() * 6 - 3);
+            float qx = 1000, qy = 1250, qs = 140;
+            for (int i = 0; i <= 20; i++) pts.Add(P(jit(qx + qs * i / 20f), jit(qy)));
+            for (int i = 1; i <= 20; i++) pts.Add(P(jit(qx + qs), jit(qy + qs * i / 20f)));
+            for (int i = 1; i <= 20; i++) pts.Add(P(jit(qx + qs - qs * i / 20f), jit(qy + qs)));
+            for (int i = 1; i < 20; i++) pts.Add(P(jit(qx), jit(qy + qs - qs * i / 20f)));
+            board.TestStroke(pts.ToArray(), true);
+            var sq = board.Items[board.Items.Count - 1] as ShapeItem;
+            check(sq != null && sq.Kind == ShapeKind.Rect, "held wobbly square snaps to a rectangle");
+            var sqr = Geo.Norm(sq.A, sq.B);
+            check(Math.Abs(sqr.Width - sqr.Height) < 0.5f, "a nearly square box becomes an exact square");
+            pts.Clear();
+            for (int i = 0; i <= 60; i++)
+            {
+                double t = i * Math.PI * 2 / 60;
+                pts.Add(P(1300 + 70 * (float)Math.Cos(t), 1250 + 70 * (float)Math.Sin(t)));
+            }
+            board.TestStroke(pts.ToArray(), true);
+            var rc = board.Items[board.Items.Count - 1] as ShapeItem;
+            check(rc != null && rc.Kind == ShapeKind.Ellipse, "a held circle still becomes a circle, not a box");
+
+            // A sloppy square (sides overshoot each other, big wobble) still snaps.
+            pts.Clear();
+            var rs = new Random(11);
+            Func<float, float> wob = v => v + (float)(rs.NextDouble() * 14 - 7);
+            float ox = 1700, oy = 1250, os = 150;
+            for (int i = 0; i <= 20; i++) pts.Add(P(wob(ox - 20 + (os + 40) * i / 20f), wob(oy)));          // top, starts and ends 20 px out
+            for (int i = 1; i <= 20; i++) pts.Add(P(wob(ox + os + 10), wob(oy - 15 + (os + 25) * i / 20f)));   // right, leans out
+            for (int i = 1; i <= 20; i++) pts.Add(P(wob(ox + os + 15 - (os + 40) * i / 20f), wob(oy + os + 12)));
+            for (int i = 1; i <= 24; i++) pts.Add(P(wob(ox - 12), wob(oy + os + 12 - (os + 40) * i / 24f)));   // left, overshoots past the start
+            board.TestStroke(pts.ToArray(), true);
+            var sloppy = board.Items[board.Items.Count - 1] as ShapeItem;
+            check(sloppy != null && sloppy.Kind == ShapeKind.Rect, "a sloppy, overshooting square still snaps to a box");
+
+            // A square drawn with bowed (curved) sides and uneven corners still snaps.
+            pts.Clear();
+            float bx = 1950, by = 1550, bs = 140, bow = 16;
+            for (int i = 0; i <= 20; i++) { float t = i / 20f; pts.Add(P(bx + bs * t, by - bow * (float)Math.Sin(t * Math.PI))); }
+            for (int i = 1; i <= 20; i++) { float t = i / 20f; pts.Add(P(bx + bs + bow * (float)Math.Sin(t * Math.PI), by + bs * t)); }
+            for (int i = 1; i <= 20; i++) { float t = i / 20f; pts.Add(P(bx + bs - bs * t, by + bs + bow * (float)Math.Sin(t * Math.PI))); }
+            for (int i = 1; i <= 20; i++) { float t = i / 20f; pts.Add(P(bx - bow * (float)Math.Sin(t * Math.PI), by + bs - bs * t)); }
+            board.TestStroke(pts.ToArray(), true);
+            var bowed = board.Items[board.Items.Count - 1] as ShapeItem;
+            check(bowed != null && bowed.Kind == ShapeKind.Rect, "a square with bowed, curved sides still snaps");
+
+            // A rectangle drawn a bit slanted (lopsided corners) still snaps.
+            pts.Clear();
+            var slant = new[] { P(2300, 1560), P(2490, 1585), P(2480, 1680), P(2290, 1650) };
+            for (int e = 0; e < 4; e++)
+            {
+                var a = slant[e]; var b = slant[(e + 1) % 4];
+                for (int i = 0; i < 20; i++) pts.Add(P(a.X + (b.X - a.X) * i / 20f + (float)Math.Sin(i * 0.9) * 5, a.Y + (b.Y - a.Y) * i / 20f));
+            }
+            pts.Add(slant[0]);
+            board.TestStroke(pts.ToArray(), true);
+            var lop = board.Items[board.Items.Count - 1];
+            check(lop is ShapeItem && ((ShapeItem)lop).Kind == ShapeKind.Rect, "a lopsided, slightly slanted rectangle still snaps");
+
+            // A held triangle becomes a clean triangle.
+            pts.Clear();
+            var tv = new[] { P(2000, 1400), P(2160, 1400), P(2080, 1260) };
+            var tr = new Random(5);
+            for (int e = 0; e < 3; e++)
+            {
+                var a = tv[e]; var b = tv[(e + 1) % 3];
+                for (int i = 0; i < 20; i++)
+                {
+                    float t = i / 20f;
+                    pts.Add(P(a.X + (b.X - a.X) * t + (float)(tr.NextDouble() * 8 - 4), a.Y + (b.Y - a.Y) * t + (float)(tr.NextDouble() * 8 - 4)));
+                }
+            }
+            pts.Add(tv[0]);
+            board.TestStroke(pts.ToArray(), true);
+            var tri = board.Items[board.Items.Count - 1] as PolyItem;
+            check(tri != null && tri.Pts.Length == 3, "a held triangle snaps to a triangle");
+
+            // After snapping, the pen can stay down and drag the shape bigger; it locks in when lifted.
+            pts.Clear();
+            for (int i = 0; i <= 60; i++)
+            {
+                double t = i * Math.PI * 2 / 60;
+                pts.Add(P(2400 + 70 * (float)Math.Cos(t), 1300 + 70 * (float)Math.Sin(t)));
+            }
+            int nBig = board.Items.Count;
+            board.TestHoldThenDrag(pts.ToArray(), new[] { P(2400 + 100, 1300), P(2400 + 140, 1300) });
+            var big = board.Items[board.Items.Count - 1] as ShapeItem;
+            check(board.Items.Count == nBig + 1 && big != null && big.Kind == ShapeKind.Ellipse, "snapped circle is committed once, on release");
+            var bigR = Geo.Norm(big.A, big.B);
+            check(Math.Abs(bigR.Width - 280 / z) < 4f / z && Math.Abs(bigR.Width - bigR.Height) < 0.5f, "dragging after the snap made the circle twice as big (" + bigR.Width + ")");
+
+            // Select moves rectangles and pen strokes (not just pictures and lines).
+            board.SetTool(Tool.Rect);
+            board.TestStroke(new[] { P(1000, 1600), P(1120, 1680) }, false);
+            var rectBefore = board.Items[board.Items.Count - 1] as ShapeItem;
+            int nItems = board.Items.Count;
+            board.TestSelectDrag(P(1060, 1600), P(1110, 1630));
+            var rectAfter = board.Items[board.Items.Count - 1] as ShapeItem;
+            check(board.Items.Count == nItems && rectAfter != null && rectAfter != rectBefore && rectAfter.Kind == ShapeKind.Rect &&
+                  Geo.Dist(rectAfter.A, P(rectBefore.A.X + 50 / z, rectBefore.A.Y + 30 / z)) < 0.5f, "Select tool moves a rectangle");
+            board.Undo();
+            check(board.Items[board.Items.Count - 1] == rectBefore, "undo puts the rectangle back");
+            board.SetTool(Tool.Pen);
+            pts.Clear();
+            for (int i = 0; i < 40; i++) pts.Add(P(1000 + i * 5, 1750 + 20 * (float)Math.Sin(i / 4.0)));
+            board.TestStroke(pts.ToArray(), false);
+            var penStroke = board.Items[board.Items.Count - 1] as StrokeItem;
+            var sp0 = penStroke.Pts[0];
+            board.TestSelectDrag(pts[10], P(pts[10].X, pts[10].Y + 60));
+            var penMoved = board.Items[board.Items.Count - 1] as StrokeItem;
+            check(penMoved != null && penMoved != penStroke && Math.Abs(penMoved.Pts[0].Y - (sp0.Y + 60 / z)) < 0.5f && Math.Abs(penMoved.Pts[0].X - sp0.X) < 0.5f,
+                  "Select tool moves a pen stroke");
+            board.Undo();
+
+            // The whole-stroke eraser takes one touch to remove a whole stroke (the normal eraser only splits it).
+            int beforeWhole = board.Items.Count;
+            board.TestStrokeErase(new[] { pts[20] });
+            check(board.Items.Count == beforeWhole - 1, "whole-stroke eraser removes the stroke with one tap");
+            board.Undo();
+            check(board.Items.Count == beforeWhole, "undo brings the stroke back");
+
+            // Graph box: drag it out, write on it, and it carries the writing when moved.
+            int beforeGraph = board.Items.Count;
+            board.TestDrawGraph(P(1400, 1250), P(1600, 1400), GraphStyle.Axes);
+            var gbox = board.Items[board.Items.Count - 1] as GraphItem;
+            check(board.Items.Count == beforeGraph + 1 && gbox != null && gbox.Style == GraphStyle.Axes, "graph box is added");
+            check(board.CurrentTool == Tool.Pen, "after drawing a graph box the pen is ready");
+            pts.Clear();
+            for (int i = 0; i < 12; i++) pts.Add(P(1440 + i * 10, 1330 - i * i * 0.6f));
+            board.TestStroke(pts.ToArray(), false);
+            var onGraph = board.Items[board.Items.Count - 1] as StrokeItem;
+            var og0 = onGraph.Pts[0];
+            board.SetTool(Tool.Select);
+            board.TestSelectDrag(P(1420, 1270), P(1460, 1290));
+            GraphItem gMoved = null; StrokeItem sMoved = null;
+            foreach (var it in board.Items) { if (it is GraphItem) gMoved = (GraphItem)it; }
+            sMoved = board.Items[board.Items.Count - 1] as StrokeItem;
+            check(gMoved != null && gMoved != gbox && Math.Abs(gMoved.Rect.X - (gbox.Rect.X + 40 / z)) < 1f && Math.Abs(gMoved.Rect.Y - (gbox.Rect.Y + 20 / z)) < 1f,
+                  "Select tool moves the graph box");
+            check(sMoved != null && Math.Abs(sMoved.Pts[0].X - (og0.X + 40 / z)) < 1.5f, "writing on the graph box moves with it");
+            board.DeleteSelected();
+            check(board.Items.Count == beforeGraph + 1 && !(board.Items.Exists(i => i is GraphItem)), "Delete removes the selected graph box (writing stays)");
+            board.SetTool(Tool.Pen);
 
             // Pen-tablet stress: dense, jittery, pressure-varying samples (what crashed v2.1.0 on Windows).
             int beforeStress = board.Items.Count;

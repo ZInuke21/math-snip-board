@@ -1,4 +1,4 @@
-// Everything that can live on a board. Coordinates are "page units" (= screen pixels at 100% zoom).
+﻿// Everything that can live on a board. Coordinates are "page units" (= screen pixels at 100% zoom).
 // Items are treated as immutable once committed, so undo can keep cheap list snapshots.
 
 using System;
@@ -367,6 +367,156 @@ namespace MathSnip
         }
     }
 
+    enum GraphStyle { Grid, Axes, Lines, Dots, Blank }
+
+    // A white box that sits on the board with its own paper pattern, so graphs can be drawn inside it
+    // while the page behind stays whatever it is. Not "ink": the eraser leaves it alone, and writing on
+    // top of it travels with it when it moves.
+    class GraphItem : Item
+    {
+        public readonly RectangleF Rect;
+        public readonly GraphStyle Style;
+
+        public GraphItem(RectangleF rect, GraphStyle style) { Rect = rect; Style = style; }
+
+        public override bool IsInk { get { return false; } }
+
+        public static float Step { get { return Program.S(32); } }
+
+        public override void Draw(Graphics g)
+        {
+            float scale = Geo.ScaleOf(g);
+            float px = 1f / Math.Max(0.01f, scale);
+            var r = Rect;
+            var oldSmooth = g.SmoothingMode;
+            g.SmoothingMode = SmoothingMode.None;
+            g.FillRectangle(Brushes.White, r);
+            var oldClip = g.Clip;
+            g.SetClip(r, CombineMode.Intersect);
+            float step = Step;
+            int i0 = (int)Math.Floor(r.Left / step) + 1, i1 = (int)Math.Floor(r.Right / step);
+            int j0 = (int)Math.Floor(r.Top / step) + 1, j1 = (int)Math.Floor(r.Bottom / step);
+            switch (Style)
+            {
+                case GraphStyle.Grid:
+                case GraphStyle.Axes:
+                    using (var minor = new Pen(Color.FromArgb(222, 228, 237), px))
+                    using (var major = new Pen(Color.FromArgb(196, 206, 221), px))
+                    {
+                        for (int i = i0; i <= i1; i++) g.DrawLine(i % 5 == 0 ? major : minor, i * step, r.Top, i * step, r.Bottom);
+                        for (int j = j0; j <= j1; j++) g.DrawLine(j % 5 == 0 ? major : minor, r.Left, j * step, r.Right, j * step);
+                    }
+                    if (Style == GraphStyle.Axes)
+                    {
+                        // axes on the grid lines nearest the middle, with arrow tips
+                        float ax = (float)Math.Round((r.X + r.Width / 2) / step) * step;
+                        float ay = (float)Math.Round((r.Y + r.Height / 2) / step) * step;
+                        using (var pen = new Pen(Color.FromArgb(71, 85, 105), Math.Max(px * 1.6f, 1.6f)))
+                        {
+                            float m = Program.S(6);
+                            g.SmoothingMode = SmoothingMode.AntiAlias;
+                            g.DrawLine(pen, r.Left + m, ay, r.Right - m, ay);
+                            g.DrawLine(pen, ax, r.Top + m, ax, r.Bottom - m);
+                            float t = Program.S(5);
+                            g.DrawLines(pen, new[] { new PointF(r.Right - m - t * 1.6f, ay - t), new PointF(r.Right - m, ay), new PointF(r.Right - m - t * 1.6f, ay + t) });
+                            g.DrawLines(pen, new[] { new PointF(ax - t, r.Top + m + t * 1.6f), new PointF(ax, r.Top + m), new PointF(ax + t, r.Top + m + t * 1.6f) });
+                            g.SmoothingMode = SmoothingMode.None;
+                        }
+                    }
+                    break;
+                case GraphStyle.Lines:
+                    using (var pen = new Pen(Color.FromArgb(200, 219, 240), px))
+                        for (int j = j0; j <= j1; j++) g.DrawLine(pen, r.Left, j * step, r.Right, j * step);
+                    break;
+                case GraphStyle.Dots:
+                    {
+                        float d = Math.Max(1.5f * Program.Dpi, px * 1.5f);
+                        using (var b = new SolidBrush(Color.FromArgb(176, 187, 202)))
+                            for (int i = i0; i <= i1; i++)
+                                for (int j = j0; j <= j1; j++) g.FillRectangle(b, i * step - d / 2, j * step - d / 2, d, d);
+                    }
+                    break;
+            }
+            g.Clip = oldClip;
+            using (var pen = new Pen(Color.FromArgb(148, 163, 184), Math.Max(px * 1.5f, 1.5f)))
+                g.DrawRectangle(pen, r.X, r.Y, r.Width, r.Height);
+            g.SmoothingMode = oldSmooth;
+        }
+
+        public override bool Hit(PointF p, float r) { return Rect.Contains(p); }
+
+        public override RectangleF Bounds { get { var b = Rect; b.Inflate(4, 4); return b; } }
+
+        public override Item Transformed(PointF from, PointF to, float s)
+        {
+            var a = Map(Rect.Location, from, to, s);
+            return new GraphItem(new RectangleF(a.X, a.Y, Rect.Width * s, Rect.Height * s), Style);
+        }
+    }
+
+    // A closed outline with straight sides (triangles from hold-to-perfect).
+    class PolyItem : Item
+    {
+        public readonly PointF[] Pts;
+        public readonly Color Ink;
+        public readonly float W;
+
+        public PolyItem(PointF[] pts, Color ink, float w) { Pts = pts; Ink = ink; W = w; }
+
+        public override void Draw(Graphics g)
+        {
+            if (Pts.Length < 3) return;
+            using (var pen = Geo.InkPen(Ink, W))
+            {
+                try { g.DrawPolygon(pen, Pts); }
+                catch { for (int i = 0; i < Pts.Length; i++) g.DrawLine(pen, Pts[i], Pts[(i + 1) % Pts.Length]); }
+            }
+        }
+
+        public override bool Hit(PointF p, float r)
+        {
+            for (int i = 0; i < Pts.Length; i++)
+                if (Geo.SegDist(p, Pts[i], Pts[(i + 1) % Pts.Length]) <= r + W / 2) return true;
+            return false;
+        }
+
+        public PointF Center
+        {
+            get
+            {
+                float x = 0, y = 0;
+                foreach (var q in Pts) { x += q.X; y += q.Y; }
+                return new PointF(x / Pts.Length, y / Pts.Length);
+            }
+        }
+
+        public PolyItem ScaledAbout(PointF c, float s)
+        {
+            var n = new PointF[Pts.Length];
+            for (int i = 0; i < n.Length; i++) n[i] = new PointF(c.X + (Pts[i].X - c.X) * s, c.Y + (Pts[i].Y - c.Y) * s);
+            return new PolyItem(n, Ink, W);
+        }
+
+        public override RectangleF Bounds
+        {
+            get
+            {
+                float x0 = float.MaxValue, y0 = float.MaxValue, x1 = float.MinValue, y1 = float.MinValue;
+                foreach (var q in Pts) { x0 = Math.Min(x0, q.X); y0 = Math.Min(y0, q.Y); x1 = Math.Max(x1, q.X); y1 = Math.Max(y1, q.Y); }
+                var r = RectangleF.FromLTRB(x0, y0, x1, y1);
+                r.Inflate(W + 3, W + 3);
+                return r;
+            }
+        }
+
+        public override Item Transformed(PointF from, PointF to, float s)
+        {
+            var n = new PointF[Pts.Length];
+            for (int i = 0; i < n.Length; i++) n[i] = Map(Pts[i], from, to, s);
+            return new PolyItem(n, Ink, W * s);
+        }
+    }
+
     class TextItem : Item
     {
         static readonly Bitmap measureBmp = new Bitmap(1, 1);
@@ -425,12 +575,8 @@ namespace MathSnip
         public static void DrawAt(Graphics g, Bitmap img, RectangleF r)
         {
             float scale = Geo.ScaleOf(g);
-            float px = 1f / Math.Max(0.01f, scale);
             var oldSmooth = g.SmoothingMode;
             g.SmoothingMode = SmoothingMode.None;
-            for (int i = 3; i >= 1; i--)
-                using (var b = new SolidBrush(Color.FromArgb(10 + 6 * (3 - i), 15, 23, 42)))
-                    g.FillRectangle(b, r.X - i * px, r.Y - i * px + px, r.Width + 2 * i * px, r.Height + 2 * i * px);
 
             bool exact = Math.Abs(r.Width * scale - img.Width) < 0.5f && Math.Abs(r.Height * scale - img.Height) < 0.5f;
             g.InterpolationMode = exact ? InterpolationMode.NearestNeighbor : InterpolationMode.HighQualityBicubic;
@@ -441,7 +587,6 @@ namespace MathSnip
                 g.DrawImage(img, Rectangle.Round(r), 0, 0, img.Width, img.Height, GraphicsUnit.Pixel, ia);
             }
             g.PixelOffsetMode = PixelOffsetMode.Default;
-            using (var pen = new Pen(Color.FromArgb(203, 208, 216), px)) g.DrawRectangle(pen, r.X, r.Y, r.Width, r.Height);
             g.SmoothingMode = oldSmooth;
         }
 
@@ -449,7 +594,7 @@ namespace MathSnip
 
         public override RectangleF Bounds
         {
-            get { var b = Rect; b.Inflate(16, 16); return b; }   // room for the shadow at any zoom
+            get { var b = Rect; b.Inflate(4, 4); return b; }
         }
     }
 }

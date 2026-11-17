@@ -147,6 +147,16 @@ namespace MathSnip
                     L(g, p, 7, 21, 21, 21);
                     L(g, p, 5, 11, 14, 20);
                     break;
+                case "eraser2":
+                    L(g, p, 3, 18, 6.5f, 11, 10, 18, 13.5f, 11, 17, 18);
+                    L(g, p, 15, 3, 21, 9);
+                    L(g, p, 21, 3, 15, 9);
+                    break;
+                case "graph":
+                    RoundRect(g, p, 3, 3, 18, 18, 2.5f);
+                    L(g, p, 7, 7, 7, 17, 17, 17);
+                    L(g, p, 9.5f, 14.5f, 12, 10.5f, 14.5f, 12.5f, 17.5f, 7.5f);
+                    break;
                 case "laser":
                     Dot(g, b, 15, 9, 2.6f);
                     g.DrawEllipse(p, 9.5f, 3.5f, 11, 11);
